@@ -42,7 +42,7 @@ export function buildPrompt(outfit, byId, styleNotes = []) {
 }
 
 // Figma 방식: 앱은 요청만 올리고, Claude Code가 Figma로 그려서 결과를 올려 둔다
-export async function requestIllustration(date) {
+export async function requestIllustration(date, priority = 'normal') {
   const outfit = await db.get('outfits', date);
   if (!outfit) throw new Error('이 날 코디가 없어요.');
   const items = await db.getAll('items');
@@ -50,7 +50,7 @@ export async function requestIllustration(date) {
   const notes = (await db.getMeta('illustStyleNotes')) || [];
   const used = outfit.items.map(id => byId[id]).filter(Boolean);
   await workerPost('/illust/request', {
-    date, itemsKey: outfit.items.join(','), sample: !(await db.getMeta('illustStyleApproved')),
+    date, itemsKey: outfit.items.join(','), priority, sample: false,
     prompt: buildPrompt(outfit, byId, notes), styleNotes: notes,
     items: used.map(({ id, name, category, type, color, length, thickness, heel }) => ({ id, name, category, type, color, length, thickness, heel })),
     photos: used.filter(i => i.photo).map(i => ({ id: i.id, data: i.photo })),
@@ -75,7 +75,8 @@ export async function pullIllustrations() {
     if (x.createdAt > last) last = x.createdAt;
     const o = await db.get('outfits', x.date);
     if (!o || (x.itemsKey && x.itemsKey !== o.items.join(','))) continue; // 그 사이 코디가 바뀌었으면 버림
-    await db.put('illustrations', { date: x.date, image: x.image, model: x.model, createdAt: x.createdAt, itemsKey: x.itemsKey, sample: !approved });
+    const image = x.image.startsWith('data:image/png') ? await toJpeg(x.image.split(',')[1], 'image/png') : x.image;
+    await db.put('illustrations', { date: x.date, image, model: x.model, createdAt: x.createdAt, itemsKey: x.itemsKey, sample: false, stale: false });
     got++;
   }
   await db.setMeta('illustSyncedAt', last);

@@ -168,3 +168,9 @@ button.cloth{padding:0;text-align:left;font:inherit;color:inherit}
 .strip-sep{flex:none;writing-mode:vertical-rl;font-size:11px;color:var(--sub);align-self:center;letter-spacing:.1em}
 .mini.preview{border-style:dashed}
 .preview-note{font-size:12.5px;color:var(--sub);margin:-6px 0 10px}
+
+/* 재코디 준비 중 표시 */
+.illu-wrap{position:relative;margin-top:12px}
+.illu-wrap .illu{margin-top:0}
+.illu.stale{filter:saturate(.7) opacity(.75)}
+.illu-badge{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);background:rgba(42,38,34,.82);color:#fff;font-size:12px;padding:7px 12px;border-radius:99px;white-space:nowrap}

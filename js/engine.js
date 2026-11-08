@@ -172,8 +172,9 @@ export async function generate(dates, opts = {}) {
       status: '자동', source: opts.redo ? '재코디' : 'AI', createdAt: now, needsRedo: false,
       history: old ? [...(old.history || []), { items: old.items, mood: old.mood, at: old.createdAt || null, reason: opts.redo ? opts.reason || '' : '일정 변경' }].slice(-5) : [],
     });
-    // 옷이 바뀌었으니 예전 일러스트는 지움 (새로 만들지는 6단계에서 확인 후)
-    if (old) await db.del('illustrations', d);
+    // 옷이 바뀌었으니 예전 그림은 '준비 중' 표시로 남겨 두고, 새 그림이 오면 바뀐다
+    const oldIl = await db.get('illustrations', d);
+    if (oldIl) await db.put('illustrations', { ...oldIl, stale: true });
   }
 
   // 재코디: 같은 주 다른 날과 겹치는 옷 알려 주기 (다른 날은 바꾸지 않음)

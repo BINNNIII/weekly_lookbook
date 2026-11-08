@@ -5,17 +5,17 @@ import { CATEGORIES, LENGTHS, THICKNESS, BAG_SIZES, FORMALITY, suggest, required
 import { shrinkPhoto } from './photo.js';
 import { workerFetch, buildDays, diffDays, WORKER_URL } from './calendar.js';
 import { fetchWeather, commuteTemp } from './weather.js';
-import { generate, estimateWon } from './engine.js';
-import { requestIllustration, cancelIllustration, pullIllustrations } from './illust.js';
+import { generate } from './engine.js';
+import { requestIllustration, pullIllustrations } from './illust.js';
 
-const APP_VERSION = 'v10';
+const APP_VERSION = 'v11';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 const DOW_KO = ['일', '월', '화', '수', '목', '금', '토'];
 const MONTH_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-const state = { tab: 'week', weekView: 'this', selected: null, closetCat: '전체', closetMode: null, closetScroll: 0, syncError: null };
+const state = { autoBusy: false, autoError: null, tab: 'week', weekView: 'this', selected: null, closetCat: '전체', closetMode: null, closetScroll: 0, syncError: null };
 
 // ---------- 공통 ----------
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -118,8 +118,8 @@ async function renderWeek() {
   const sel0 = $view.querySelector('.mini.sel'); if (sel0) sel0.scrollIntoView({ inline: 'center', block: 'nearest' });
   bindSeg();
   if (!past && o && sel === t) bindFeedback(sel, o);
-  $view.querySelectorAll('[data-gen]').forEach(b => b.onclick = () => askGenerate(JSON.parse(b.dataset.gen), b.dataset.label));
-  bindIllust();
+  const retry = $view.querySelector('#autoRetry');
+  if (retry) retry.onclick = () => { state.autoError = null; autoRun(); };
   if (past) $view.querySelector('#delPrev').onclick = async () => {
     if (!confirm(`${md(w.start)}~${md(w.end)} 코디 기록을 삭제할까요?\n삭제하면 되돌릴 수 없어요. (필요하면 먼저 백업을 내보내 두세요)`)) return;
     for (const d of w.days) { await db.del('outfits', d); await db.del('illustrations', d); }
@@ -173,19 +173,17 @@ async function dayCard(d, o, il, byId, isToday, inf, wx, isPast = false) {
       ${fb ? `<p class="hint">저장됨 · ${new Date(fb.createdAt).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>` : ''}
       <p class="lb-small">재코디</p>
       <textarea class="memo" id="redoReason" rows="1" placeholder="바꾸고 싶은 이유 (선택) — 예: 바지 말고 치마"></textarea>
-      <div class="row"><button class="btn ghost" id="redoBtn">재코디 요청 (약 ${estimateWon(1)}원)</button></div>
-      <p class="hint">오늘 코디만 바뀌고 이번 주 다른 날은 그대로예요.</p></div>`;
+      <div class="row"><button class="btn ghost" id="redoBtn">재코디 요청</button></div>
+      <p class="hint">오늘 코디만 바로 바뀌고, 그림은 새로 그려지면 바뀌어요. 다른 날은 그대로예요.</p></div>`;
   }
   return `<article class="day">
     <div class="stage"><div class="meta"><span class="date">${md(d)}</span><span class="dow">${DOW_EN[weekday(d)]}</span>${isToday ? '<span class="today-mark">오늘</span>' : ''}</div>
       <span class="tag ${isOff(code) ? 'off' : ''}">${isOff(code) ? '휴무' : '출근 ' + esc(code)}</span>
-      ${il ? `<img class="illu" src="${il.image}" alt="코디 일러스트">` : ((await db.getMeta('illustPending')) || []).includes(d)
-        ? `<div class="illu illu-empty">일러스트 요청됨 ✓<br><span class="hint">Claude Code에 "일러스트 만들어줘"라고 말하면 그려져요</span><br><button class="link-btn" data-cancel="${d}">요청 취소</button></div>`
-        : `<div class="illu illu-empty">일러스트가 아직 없어요${isPast ? '' : `<br><button class="btn ghost small" data-illu="${d}">일러스트 요청</button>`}</div>`}
-      ${il && !isPast ? await illuControls(d, il) : ''}
+      ${il ? `<div class="illu-wrap"><img class="illu ${il.stale ? 'stale' : ''}" src="${il.image}" alt="코디 일러스트">${il.stale && !isPast ? '<span class="illu-badge">재코디 준비 중 · 새 그림이 오면 바뀌어요</span>' : ''}</div>`
+        : `<div class="illu illu-empty">${isPast ? '일러스트 없음' : '그림 준비 중이에요<br><span class="hint">자동으로 그려지면 여기 나와요</span>'}</div>`}
       <div class="mood"><span>${esc(o.mood)}</span><span class="pal">${(o.palette || []).map(c => `<i style="background:${esc(c)}"></i>`).join('')}</span></div>
     </div>
-    <div class="info">${o.needsRedo ? '<p class="redo">일정이 바뀌어서 이 날 코디를 다시 짜야 해요. (5단계에서 자동으로 다시 짜요)</p>' : ''}
+    <div class="info">${o.needsRedo ? '<p class="redo">일정이 바뀌어서 이 날 코디를 다시 짜는 중이에요.</p>' : ''}
       <p class="sched">${schedule.map(esc).join(' · ') || (isOff(code) ? '일정 없음' : '')}</p>
       <p class="wx">${esc(wxLine)}</p>${wxDiff}
       <ul class="items">${list}</ul>
@@ -210,120 +208,77 @@ function bindFeedback(d, o) {
   };
   $view.querySelector('#redoBtn').onclick = () => {
     const reason = $view.querySelector('#redoReason').value.trim();
-    if (!confirm(`오늘(${md(d)}) 코디를 AI로 다시 짤까요?\n예상 비용 약 ${estimateWon(1)}원 (Claude Sonnet 5.5)\n${reason ? '이유: ' + reason : ''}`)) return;
     runGenerate([d], { redo: true, reason });
   };
 }
 
-// ---------- 코디 짜기 ----------
+// ---------- 자동 코디·일러스트 (비용 자동 승인, 일러스트는 하루 5장 한도는 서버에서) ----------
 async function planPanels(t, w, outfits) {
-  const pend = w.days.filter(d => d >= t && (!outfits[d] || outfits[d].needsRedo));
   const nw = weekOf(addDays(w.end, 1));
-  const nOut = Object.fromEntries((await db.getAll('outfits')).filter(o => nw.days.includes(o.date)).map(o => [o.date, o]));
-  const nPend = nw.days.filter(d => !nOut[d] || nOut[d].needsRedo);
-  const btn = (dates, label) => `<button class="btn" data-gen='${JSON.stringify(dates)}' data-label="${esc(label)}">${esc(label)} (약 ${estimateWon(dates.length)}원)</button>`;
-  let h = '';
-  if (pend.length) {
-    const redo = pend.filter(d => outfits[d]?.needsRedo).length;
-    h += `<div class="panel" style="margin-top:16px"><h3>이번 주 코디 짜기</h3>
-      <p>코디 없는 날 ${pend.length - redo}일${redo ? ` · 일정 바뀐 날 ${redo}일` : ''} (${pend.map(md).join(', ')})</p>${btn(pend, `${pend.length}일 코디 짜기`)}</div>`;
-  }
-  h += await illuPanel(w.days.filter(d => d >= t && outfits[d] && !outfits[d].needsRedo), '이번 주');
-  h += `<div class="panel" style="margin-top:12px"><h3>다음 주 (${md(nw.start)}~${md(nw.end)})</h3>`;
-  h += nPend.length
-    ? `<p>${nPend.length === nw.days.length ? '아직 안 짰어요.' : `${nPend.length}일이 남았어요.`} 미리 짜 두면 다음 주에 보여요.</p>${btn(nPend, '다음 주 코디 미리 짜기')}`
-    : '<p>✓ 다음 주 코디가 준비돼 있어요. 다음 주가 되면 보여요.</p>';
-  const nIll = new Set((await db.getAll('illustrations')).map(x => x.date));
-  const nNeed = nw.days.filter(d => nOut[d] && !nOut[d].needsRedo && !nIll.has(d));
-  if (!nPend.length && nNeed.length && (await db.getMeta('illustStyleApproved'))) h += illuBtn(nNeed, '다음 주 일러스트 만들기');
+  const all = await db.getAll('outfits');
+  const nOut = all.filter(o => nw.days.includes(o.date) && !o.needsRedo).length;
+  const ill = new Set((await db.getAll('illustrations')).filter(x => !x.stale).map(x => x.date));
+  const nIll = nw.days.filter(d => ill.has(d)).length;
+  const auto = (await db.getMeta('autoMode')) !== false;
+  let h = `<div class="panel" style="margin-top:16px"><h3>다음 주 (${md(nw.start)}~${md(nw.end)})</h3>`;
+  if (state.autoBusy) h += '<p>코디를 짜는 중이에요…</p>';
+  else h += `<p>코디 ${nOut}/${nw.days.length}일 · 일러스트 ${nIll}/${nw.days.length}장 준비됨${auto ? ' · 자동으로 채워져요' : ''}</p>`;
+  if (state.autoError) h += `<p class="hint warn-hint">자동 코디 실패: ${esc(state.autoError)}</p><button class="btn ghost small" id="autoRetry">다시 시도</button>`;
   return h + '</div>';
 }
 
-// ---------- 일러스트 ----------
-const illuBtn = (dates, label) => `<button class="btn ${label.includes('샘플') ? '' : 'ghost'}" style="margin-top:10px" data-illus='${JSON.stringify(dates)}'>${esc(label)}${dates.length > 1 ? ' ' + dates.length + '장' : ''}</button>`;
-
-async function illuPanel(days, label) {
-  const ill = new Set((await db.getAll('illustrations')).map(x => x.date));
-  const pend = new Set((await db.getMeta('illustPending')) || []);
-  const need = days.filter(d => !ill.has(d) && !pend.has(d));
-  if (!need.length) return '';
-  const approved = await db.getMeta('illustStyleApproved');
-  return `<div class="panel" style="margin-top:12px"><h3>${label} 일러스트</h3>
-    ${approved
-      ? `<p>일러스트가 없는 날 ${need.length}일 (${need.map(md).join(', ')}). 요청해 두고 Claude Code에 "일러스트 만들어줘"라고 말하면 Figma로 그려 드려요.</p>${illuBtn(need, `${label} 일러스트 요청`)}`
-      : pend.size ? '' : `<p>새 그림체라서 먼저 1장만 그려 볼게요. 마음에 들면 나머지를 한 번에 요청할 수 있어요.</p>${illuBtn([need[0]], `${md(need[0])} 샘플 1장 요청`)}`}</div>`;
-}
-
-async function illuControls(d, il) {
-  const approved = await db.getMeta('illustStyleApproved');
-  if (il.sample && !approved) return `<div class="style-ask"><p>이 그림체 어때요?</p>
-    <div class="row"><button class="btn small" data-style="ok">좋아요, 이 스타일로</button><button class="btn ghost small" data-style="no" data-d="${d}">별로예요</button></div></div>`;
-  return `<button class="link-btn" data-illu="${d}" data-again="1">다시 그리기 요청</button>`;
-}
-
-function bindIllust() {
-  $view.querySelectorAll('[data-illu]').forEach(b => b.onclick = () => {
-    const d = b.dataset.illu;
-    if (!confirm(`${md(d)} 일러스트를 ${b.dataset.again ? '다시 ' : ''}요청할까요?\nClaude Code가 Figma로 그려요 (Figma AI 크레딧 1회 사용).`)) return;
-    runIllust([d]);
-  });
-  $view.querySelectorAll('[data-illus]').forEach(b => b.onclick = () => {
-    const ds = JSON.parse(b.dataset.illus);
-    if (!confirm(`일러스트 ${ds.length}장을 요청할까요?\n${ds.map(md).join(', ')}\nClaude Code가 Figma로 그려요 (Figma AI 크레딧 ${ds.length}회 사용).`)) return;
-    runIllust(ds);
-  });
-  $view.querySelectorAll('[data-cancel]').forEach(b => b.onclick = async () => {
-    try { await cancelIllustration(b.dataset.cancel); toast('요청을 취소했어요.'); } catch (e) { alert(e.message); }
-    render();
-  });
-  $view.querySelectorAll('[data-style]').forEach(b => b.onclick = async () => {
-    if (b.dataset.style === 'ok') {
-      await db.setMeta('illustStyleApproved', true);
-      for (const x of await db.getAll('illustrations')) if (x.sample) await db.put('illustrations', { ...x, sample: false });
-      toast('이 그림체로 확정했어요. 이제 일주일치를 한 번에 만들 수 있어요.');
-      return render();
+// 코디가 없는 날(이번 주 남은 날 + 다음 주)을 자동으로 짜고, 그림이 없는 날은 그림을 자동 요청
+async function autoRun() {
+  if (state.autoBusy || (await db.getMeta('autoMode')) === false) return;
+  if (!(await db.getMeta('appKey')) || !(await db.getAll('items')).length) return;
+  const t = await today();
+  const w = weekOf(t), nw = weekOf(addDays(w.end, 1));
+  const outs = Object.fromEntries((await db.getAll('outfits')).map(o => [o.date, o]));
+  const need = [...w.days.filter(d => d >= t), ...nw.days].filter(d => !outs[d] || outs[d].needsRedo);
+  state.autoBusy = true; state.autoError = null;
+  try {
+    if (need.length) {
+      if (state.tab === 'week') render();
+      const r = await generate(need, {});
+      const fail = Object.keys(r.failed);
+      if (fail.length) state.autoError = `${fail.map(md).join(', ')} 규칙에 맞는 코디를 못 찾았어요`;
+      if (r.saved.length) toast(`${r.saved.length}일 코디를 짰어요 (약 ${r.won}원). 그림은 자동으로 그려져요.`);
     }
-    const note = prompt('어떤 점이 별로였나요? 다음 그림에 반영할게요.\n예: 더 손그림 느낌으로, 얼굴을 더 작게, 옷 색이 달라요');
-    if (note === null) return;
-    if (note.trim()) {
-      const notes = (await db.getMeta('illustStyleNotes')) || [];
-      notes.push(note.trim());
-      await db.setMeta('illustStyleNotes', notes);
+    // 그림 자동 요청: 오늘부터 다음 주 끝까지, 그림이 없거나 옛 그림인 날
+    const ill = Object.fromEntries((await db.getAll('illustrations')).map(x => [x.date, x]));
+    const pend = new Set((await db.getMeta('illustPending')) || []);
+    const outs2 = await db.getAll('outfits');
+    for (const o of outs2) {
+      if (o.date < t || o.date > nw.end || o.needsRedo || pend.has(o.date)) continue;
+      const il = ill[o.date];
+      if (il && !il.stale && (!il.itemsKey || il.itemsKey === o.items.join(','))) continue;
+      try { await requestIllustration(o.date, o.source === '재코디' ? 'redo' : 'normal'); } catch {}
     }
-    if (confirm('요청을 반영해서 다시 그리도록 요청할까요?\n(Figma AI 크레딧 1회 사용)')) runIllust([b.dataset.d]); else render();
-  });
+  } catch (e) {
+    state.autoError = e.message;
+  } finally {
+    state.autoBusy = false;
+  }
+  if (state.tab === 'week') render();
 }
 
-async function runIllust(dates) {
-  const fail = [];
-  for (const d of dates) { try { await requestIllustration(d); } catch (e) { fail.push(`${md(d)}: ${e.message}`); } }
-  if (fail.length) alert(`요청 실패\n${fail.join('\n')}`);
-  else alert(`일러스트 ${dates.length}장을 요청했어요.\n\nClaude Code에 "일러스트 만들어줘"라고 말하면 Figma로 그려서 올려 둘게요. 앱을 다시 열면 자동으로 받아와요.`);
-  render();
-}
-
-function askGenerate(dates, label) {
-  if (!confirm(`${label}\n${dates.map(md).join(', ')} · ${dates.length}일\n\n예상 비용 약 ${estimateWon(dates.length)}원 (Claude Sonnet 5.5)\n진행할까요?`)) return;
-  runGenerate(dates);
-}
-
+// 재코디: 확인 없이 바로 (비용 자동 승인). 코디는 즉시 바뀌고, 그림은 '준비 중' 표시 후 도착하면 교체
 async function runGenerate(dates, opts = {}) {
   const el = document.createElement('div');
   el.className = 'modal busy';
-  el.innerHTML = `<div class="sheet"><h3>코디 짜는 중…</h3><p>${dates.length}일 · 보통 20초~1분 걸려요. 화면을 닫지 말아 주세요.</p></div>`;
+  el.innerHTML = `<div class="sheet"><h3>코디 짜는 중…</h3><p>보통 20초~1분 걸려요.</p></div>`;
   document.body.appendChild(el);
   try {
     const r = await generate(dates, opts);
     el.remove();
     const fail = Object.entries(r.failed);
-    let msg = `${r.saved.length}일 코디를 짰어요. 이번 비용 약 ${r.won}원.`;
-    if (fail.length) msg += `\n\n규칙에 맞는 코디를 못 찾은 날:\n${fail.map(([d, e]) => `${md(d)}: ${e.join(', ')}`).join('\n')}\n(옷장에 맞는 옷이 부족하면 생길 수 있어요)`;
-    if (r.overlaps.length) msg += `\n\n같은 주 다른 날과 겹치는 옷 (다른 날은 그대로 둬요):\n${r.overlaps.join('\n')}`;
-    alert(msg);
-    if (opts.redo && r.saved.length && confirm('새 코디의 일러스트도 요청할까요?\n(Claude Code가 Figma로 그려요)')) { await runIllust(r.saved); return; }
+    if (fail.length) alert(`규칙에 맞는 코디를 못 찾았어요.\n${fail.map(([d, e]) => `${md(d)}: ${e.join(', ')}`).join('\n')}`);
+    for (const d of r.saved) { try { await requestIllustration(d, opts.redo ? 'redo' : 'normal'); } catch {} }
+    if (r.saved.length) toast(`코디를 바꿨어요 (약 ${r.won}원). 새 그림은 자동으로 그려져요.`);
+    if (r.overlaps.length) alert(`같은 주 다른 날과 겹치는 옷이 있어요 (다른 날은 그대로 둬요)\n${r.overlaps.join('\n')}`);
   } catch (e) {
     el.remove();
-    alert(`코디를 짜지 못했어요.\n${e.message}${/비밀번호/.test(e.message) ? '\n\n→ Claude가 준 연결 링크를 다시 한 번 눌러 주세요. (설정 → 캘린더 · 날씨 연결에서 끝 4자리를 확인할 수 있어요)' : ''}`);
+    alert(`코디를 짜지 못했어요.\n${e.message}${/비밀번호/.test(e.message) ? '\n\n→ Claude가 준 연결 링크를 홈 화면 앱의 설정 → 캘린더 · 날씨 연결 칸에 붙여 넣어 주세요.' : ''}`);
   }
   render();
 }
@@ -359,7 +314,7 @@ async function sync({ manual = false } = {}) {
 
   const keep = Object.fromEntries(Object.entries(snap?.days || {}).filter(([d]) => d >= addDays(t, -35)));
   await db.setMeta('calendarSnapshot', { checkedAt: data.fetchedAt, from: dates[0], to: dates[dates.length - 1], calendars: data.calendars, errors: data.errors, days: { ...keep, ...nowDays } });
-  if (changes.length) await showChanges(changes, outfits);
+  if (changes.length) showChanges(changes, outfits).then(() => { render(); autoRun(); }); // 창을 기다리지 않음
 }
 
 function showChanges(changes, outfits) {
@@ -383,7 +338,7 @@ function showChanges(changes, outfits) {
         const o = byDate[c.date];
         await db.put('outfits', { ...o, workCode: c.now.workCode, schedule: c.now.schedule, needsRedo: true });
       }
-      toast(`${affected.length}일 코디를 다시 짜기로 표시했어요.`);
+      toast(`${affected.length}일 코디를 다시 짤게요. 그림도 자동으로 다시 그려져요.`);
       close();
     };
   });
@@ -608,6 +563,9 @@ async function renderSettings() {
       <div class="row"><button class="btn" id="syncNow">지금 확인</button></div>
       <p class="hint">${key ? `저장된 연결 비밀번호: …${esc(key.slice(-4))}` : ''} · 연결 링크를 다시 누르면 자동으로 바뀌어요.</p>
       <div class="set-row"><input class="inp" id="keyIn" placeholder="연결 링크 또는 비밀번호 붙여 넣기 (API 키 X)" style="font-size:13px"><button class="small-btn" id="keySave">저장</button></div></div>
+    <div class="panel"><h3>자동 코디 · 일러스트</h3>
+      <p>켜 두면 앱을 열 때 비어 있는 날(이번 주 남은 날 + 다음 주)의 코디를 알아서 짜고, 그림도 자동으로 그려져요. 비용은 미리 승인된 걸로 처리해요 (코디 주 약 60원 · 일러스트는 Figma 크레딧, 하루 최대 5장).</p>
+      <div class="set-row"><span class="lb">자동으로 하기</span><button class="small-btn" id="autoToggle">${(await db.getMeta('autoMode')) === false ? '꺼짐 → 켜기' : '켜짐 → 끄기'}</button></div></div>
     <div class="panel"><h3>내 코디 규칙</h3>
       <p>코디를 짤 때 AI가 꼭 참고해요. 예: "금요일엔 바지", "빨간 가디건은 휴무일에만"</p>
       <ul class="rules">${custom.map(r => `<li><span>${esc(r.text)}</span><button class="small-btn" data-del="${r.id}">삭제</button></li>`).join('') || '<li class="empty">아직 없어요</li>'}</ul>
@@ -624,6 +582,13 @@ async function renderSettings() {
     <div class="panel"><h3>테스트용 오늘 날짜</h3><p>다른 날짜를 '오늘'로 보고 싶을 때만 써요. 평소에는 비워 두세요.</p>
       <div class="set-row"><input type="date" id="tdate" value="${test || ''}"><button class="small-btn" id="tclear">원래 날짜로</button></div></div>
     <div class="panel"><h3>앱 정보</h3><p>주간 코디 ${APP_VERSION} · 데이터는 이 폰 안에만 저장돼요.</p></div>`;
+  $view.querySelector('#autoToggle').onclick = async () => {
+    const off = (await db.getMeta('autoMode')) === false;
+    await db.setMeta('autoMode', off ? true : false);
+    toast(off ? '자동으로 하기를 켰어요.' : '자동으로 하기를 껐어요.');
+    renderSettings();
+    if (off) autoRun();
+  };
   $view.querySelector('#ruleAdd').onclick = async () => {
     const v = $view.querySelector('#ruleIn').value.trim();
     if (!v) return toast('규칙을 적어 주세요.');
@@ -694,9 +659,14 @@ async function boot() {
   await takeKeyFromLink();
   updateTestbar();
   await render();
-  if ((await db.getAll('items')).length) { await sync(); if (state.tab === 'week') render(); }
+  await db.setMeta('illustStyleApproved', true); // 2026-11-08 그림체 확정
+  if ((await db.getAll('items')).length) { await sync(); if (state.tab === 'week') render(); await autoRun(); }
 }
 boot();
+setInterval(async () => {
+  if (document.visibilityState !== 'visible' || !((await db.getMeta('illustPending')) || []).length) return;
+  try { const got = await pullIllustrations(); if (got) { toast(`새 그림 ${got}장이 도착했어요.`); if (state.tab === 'week') render(); } } catch {}
+}, 60000);
 document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState === 'visible' && (await db.getAll('items')).length) { await sync(); if (state.tab === 'week') render(); }
+  if (document.visibilityState === 'visible' && (await db.getAll('items')).length) { await sync(); if (state.tab === 'week') render(); await autoRun(); }
 });
