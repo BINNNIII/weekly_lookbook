@@ -101,7 +101,7 @@ async function feedbackText(byId) {
 }
 
 function ctxText(c) {
-  const w = c.min != null ? `${c.summary || ''} 최저 ${c.min}℃ / 최고 ${c.max}℃${c.feelMin != null ? ` (체감 ${c.feelMin}~${c.feelMax}℃)` : ''}${c.pop != null ? `, 강수 ${c.pop}%` : ''}${c.commuteTemp != null ? `, 출근 시각 ${c.commuteTemp}℃` : ''}` : '예보 없음 (11월 서울 평년 기준으로 판단)';
+  const w = c.min != null ? `${c.summary || ''} 최저 ${c.min}℃ / 최고 ${c.max}℃${c.feelMin != null ? ` (체감 ${c.feelMin}~${c.feelMax}℃)` : ''}${c.pop != null ? `, 강수 ${c.pop}%` : ''}${c.commuteTemp != null ? `, 출퇴근 중 가장 추운 때 ${c.commuteTemp}℃` : ''}` : '예보 없음 (11월 서울 평년 기준으로 판단)';
   return `${c.workCode === '휴무' ? '휴무' : c.workCode + ' 근무'} · 일정: ${c.schedule.join(', ') || '없음'} · 날씨: ${w}`;
 }
 

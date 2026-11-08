@@ -7,7 +7,7 @@ import { workerFetch, buildDays, diffDays, WORKER_URL } from './calendar.js';
 import { fetchWeather, commuteTemp } from './weather.js';
 import { generate, estimateWon } from './engine.js';
 
-const APP_VERSION = 'v6';
+const APP_VERSION = 'v7';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
@@ -141,7 +141,8 @@ function liveWx(w, schedule = []) {
   const parts = [`${w.icon} ${w.summary}`.trim(), `${w.min}~${w.max}℃`, `체감 ${w.feelMin}~${w.feelMax}℃`];
   if (w.pop != null) parts.push(`강수 ${w.pop}%`);
   const c = commuteTemp(w, schedule);
-  if (c) parts.push(`출근길(${c.hour}시) ${c.t}℃`);
+  if (c?.go) parts.push(`출근길(${c.go.hour}시) ${c.go.t}℃`);
+  if (c?.back) parts.push(`퇴근길(${c.back.hour}시) ${c.back.t}℃`);
   return parts.join(' · ');
 }
 

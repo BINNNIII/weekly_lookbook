@@ -39,12 +39,15 @@ export async function fetchWeather() {
   return { fetchedAt: new Date().toISOString(), days };
 }
 
-// 출근 시각의 기온 (예: "06:30–15:30 근무" → 6시)
+// 출근·퇴근 시각의 기온 → 더 추운 쪽을 기준으로 (예: B 12:30–21:30 근무면 밤 퇴근길이 더 추움)
 export function commuteTemp(day, schedule = []) {
   if (!day) return null;
-  const m = schedule.join(' ').match(/(\d{2}):(\d{2})–\d{2}:\d{2} 근무/);
+  const m = schedule.join(' ').match(/(\d{2}):(\d{2})–(\d{2}):(\d{2}) 근무/);
   if (!m) return null;
-  const h = +m[1];
-  const x = day.hours[h];
-  return x ? { hour: h, ...x } : null;
+  const sh = +m[1], eh = Math.min(23, +m[3] + (+m[4] >= 30 ? 1 : 0));
+  const s = day.hours[sh], e = day.hours[eh];
+  if (!s && !e) return null;
+  const go = s ? { hour: sh, ...s } : null, back = e ? { hour: eh, ...e } : null;
+  const cold = !back || (go && go.t <= back.t) ? go : back;
+  return { ...cold, go, back };
 }
