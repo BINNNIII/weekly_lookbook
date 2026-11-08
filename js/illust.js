@@ -1,8 +1,8 @@
 // 코디 일러스트 (Gemini 이미지 생성). 코드로 그린 그림은 쓰지 않는다.
 import * as db from './db.js';
-import { workerPost } from './calendar.js';
+import { workerPost, workerFetch } from './calendar.js';
 
-export const WON_PER_IMAGE = 95; // gemini-3.1-flash-image 1K 기준 추정 (장당 약 $0.067)
+export const WON_PER_IMAGE = 95; // (Gemini API 직접 방식용 — 지금은 Figma 크레딧 사용)
 
 const ROLE = { '아우터': 'outerwear', '상의': 'top', '하의': 'bottom', '원피스': 'dress', '신발': 'shoes', '가방': 'bag', '양말·스타킹': 'legwear', '액세서리': 'accessory' };
 const ORDER = ['아우터', '원피스', '상의', '하의', '양말·스타킹', '신발', '가방', '액세서리'];
@@ -35,12 +35,52 @@ export function buildPrompt(outfit, byId, styleNotes = []) {
     'She wears exactly these items and nothing else (Korean product names given; the written color is always correct):',
     ...lines,
     '',
-    'Reference photos of the real items follow. Use each photo ONLY for that item\'s silhouette, neckline, length, fabric texture and real details (buttons, pockets, pleats, stripes, trims).',
-    'Ignore the person, pose, background and any different color shown in the photos; the written color wins.',
-    'Do not invent details that are not in the reference (no extra buttons, no extra pockets, no logos). Items without a photo should look simple and basic.',
+    'Draw only the details described for each item. Do not invent details (no extra buttons, no extra pockets, no logos). Items without described details should look simple and basic.',
     'Fashionable, modest, clean silhouette, every clothing item clearly visible. No text, no letters, no logos, no watermark.',
     ...(styleNotes.length ? ['', 'Style adjustments requested by the user:', ...styleNotes.map(s => `- ${s}`)] : []),
   ].join('\n');
+}
+
+// Figma 방식: 앱은 요청만 올리고, Claude Code가 Figma로 그려서 결과를 올려 둔다
+export async function requestIllustration(date) {
+  const outfit = await db.get('outfits', date);
+  if (!outfit) throw new Error('이 날 코디가 없어요.');
+  const items = await db.getAll('items');
+  const byId = Object.fromEntries(items.map(i => [i.id, i]));
+  const notes = (await db.getMeta('illustStyleNotes')) || [];
+  const used = outfit.items.map(id => byId[id]).filter(Boolean);
+  await workerPost('/illust/request', {
+    date, itemsKey: outfit.items.join(','), sample: !(await db.getMeta('illustStyleApproved')),
+    prompt: buildPrompt(outfit, byId, notes), styleNotes: notes,
+    items: used.map(({ id, name, category, type, color, length, thickness, heel }) => ({ id, name, category, type, color, length, thickness, heel })),
+    photos: used.filter(i => i.photo).map(i => ({ id: i.id, data: i.photo })),
+  });
+  const pend = new Set((await db.getMeta('illustPending')) || []);
+  pend.add(date);
+  await db.setMeta('illustPending', [...pend]);
+}
+
+export async function cancelIllustration(date) {
+  await workerPost('/illust/cancel', { date });
+  await db.setMeta('illustPending', ((await db.getMeta('illustPending')) || []).filter(d => d !== date));
+}
+
+// 앱을 켤 때: 완성된 그림 받아오기
+export async function pullIllustrations() {
+  const since = (await db.getMeta('illustSyncedAt')) || '';
+  const r = await workerFetch(`/illust/results${since ? '?since=' + encodeURIComponent(since) : ''}`);
+  const approved = await db.getMeta('illustStyleApproved');
+  let got = 0, last = since;
+  for (const x of r.results || []) {
+    if (x.createdAt > last) last = x.createdAt;
+    const o = await db.get('outfits', x.date);
+    if (!o || (x.itemsKey && x.itemsKey !== o.items.join(','))) continue; // 그 사이 코디가 바뀌었으면 버림
+    await db.put('illustrations', { date: x.date, image: x.image, model: x.model, createdAt: x.createdAt, itemsKey: x.itemsKey, sample: !approved });
+    got++;
+  }
+  await db.setMeta('illustSyncedAt', last);
+  await db.setMeta('illustPending', r.pending || []);
+  return got;
 }
 
 async function toJpeg(b64, mime, maxW = 720) {

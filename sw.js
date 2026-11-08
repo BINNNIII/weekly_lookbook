@@ -1,5 +1,5 @@
 // 오프라인에서도 앱 화면이 열리게 하는 파일. 인터넷이 되면 항상 최신 파일을 먼저 받는다.
-const CACHE = 'weekly-lookbook-v8';
+const CACHE = 'weekly-lookbook-v9';
 const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/db.js', 'js/backup.js', 'js/weekRange.js', 'js/classify.js', 'js/photo.js', 'js/calendar.js', 'js/weather.js', 'js/rules.js', 'js/engine.js', 'js/illust.js',
   'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 

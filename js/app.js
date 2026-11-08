@@ -6,9 +6,9 @@ import { shrinkPhoto } from './photo.js';
 import { workerFetch, buildDays, diffDays, WORKER_URL } from './calendar.js';
 import { fetchWeather, commuteTemp } from './weather.js';
 import { generate, estimateWon } from './engine.js';
-import { makeIllustration, WON_PER_IMAGE } from './illust.js';
+import { requestIllustration, cancelIllustration, pullIllustrations } from './illust.js';
 
-const APP_VERSION = 'v8';
+const APP_VERSION = 'v9';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
@@ -179,7 +179,9 @@ async function dayCard(d, o, il, byId, isToday, inf, wx, isPast = false) {
   return `<article class="day">
     <div class="stage"><div class="meta"><span class="date">${md(d)}</span><span class="dow">${DOW_EN[weekday(d)]}</span>${isToday ? '<span class="today-mark">오늘</span>' : ''}</div>
       <span class="tag ${isOff(code) ? 'off' : ''}">${isOff(code) ? '휴무' : '출근 ' + esc(code)}</span>
-      ${il ? `<img class="illu" src="${il.image}" alt="코디 일러스트">` : `<div class="illu illu-empty">일러스트가 아직 없어요${isPast ? '' : `<br><button class="btn ghost small" data-illu="${d}">일러스트 만들기 (약 ${WON_PER_IMAGE}원)</button>`}</div>`}
+      ${il ? `<img class="illu" src="${il.image}" alt="코디 일러스트">` : ((await db.getMeta('illustPending')) || []).includes(d)
+        ? `<div class="illu illu-empty">일러스트 요청됨 ✓<br><span class="hint">Claude Code에 "일러스트 만들어줘"라고 말하면 그려져요</span><br><button class="link-btn" data-cancel="${d}">요청 취소</button></div>`
+        : `<div class="illu illu-empty">일러스트가 아직 없어요${isPast ? '' : `<br><button class="btn ghost small" data-illu="${d}">일러스트 요청</button>`}</div>`}
       ${il && !isPast ? await illuControls(d, il) : ''}
       <div class="mood"><span>${esc(o.mood)}</span><span class="pal">${(o.palette || []).map(c => `<i style="background:${esc(c)}"></i>`).join('')}</span></div>
     </div>
@@ -238,36 +240,41 @@ async function planPanels(t, w, outfits) {
 }
 
 // ---------- 일러스트 ----------
-const illuBtn = (dates, label) => `<button class="btn ${label.includes('샘플') ? '' : 'ghost'}" style="margin-top:10px" data-illus='${JSON.stringify(dates)}'>${esc(label)} ${dates.length > 1 ? dates.length + '장 ' : ''}(약 ${WON_PER_IMAGE * dates.length}원)</button>`;
+const illuBtn = (dates, label) => `<button class="btn ${label.includes('샘플') ? '' : 'ghost'}" style="margin-top:10px" data-illus='${JSON.stringify(dates)}'>${esc(label)}${dates.length > 1 ? ' ' + dates.length + '장' : ''}</button>`;
 
 async function illuPanel(days, label) {
   const ill = new Set((await db.getAll('illustrations')).map(x => x.date));
-  const need = days.filter(d => !ill.has(d));
+  const pend = new Set((await db.getMeta('illustPending')) || []);
+  const need = days.filter(d => !ill.has(d) && !pend.has(d));
   if (!need.length) return '';
   const approved = await db.getMeta('illustStyleApproved');
   return `<div class="panel" style="margin-top:12px"><h3>${label} 일러스트</h3>
     ${approved
-      ? `<p>일러스트가 없는 날 ${need.length}일 (${need.map(md).join(', ')})</p>${illuBtn(need, `${label} 일러스트 만들기`)}`
-      : `<p>새 그림체라서 먼저 1장만 만들어 볼게요. 마음에 들면 나머지를 한 번에 만들 수 있어요.</p>${illuBtn([need[0]], `${md(need[0])} 샘플 1장 만들기`)}`}</div>`;
+      ? `<p>일러스트가 없는 날 ${need.length}일 (${need.map(md).join(', ')}). 요청해 두고 Claude Code에 "일러스트 만들어줘"라고 말하면 Figma로 그려 드려요.</p>${illuBtn(need, `${label} 일러스트 요청`)}`
+      : pend.size ? '' : `<p>새 그림체라서 먼저 1장만 그려 볼게요. 마음에 들면 나머지를 한 번에 요청할 수 있어요.</p>${illuBtn([need[0]], `${md(need[0])} 샘플 1장 요청`)}`}</div>`;
 }
 
 async function illuControls(d, il) {
   const approved = await db.getMeta('illustStyleApproved');
   if (il.sample && !approved) return `<div class="style-ask"><p>이 그림체 어때요?</p>
     <div class="row"><button class="btn small" data-style="ok">좋아요, 이 스타일로</button><button class="btn ghost small" data-style="no" data-d="${d}">별로예요</button></div></div>`;
-  return `<button class="link-btn" data-illu="${d}" data-again="1">다시 그리기 (약 ${WON_PER_IMAGE}원)</button>`;
+  return `<button class="link-btn" data-illu="${d}" data-again="1">다시 그리기 요청</button>`;
 }
 
 function bindIllust() {
   $view.querySelectorAll('[data-illu]').forEach(b => b.onclick = () => {
     const d = b.dataset.illu;
-    if (!confirm(`${md(d)} 일러스트를 ${b.dataset.again ? '다시 ' : ''}만들까요?\n1장 · 약 ${WON_PER_IMAGE}원 (Gemini)`)) return;
+    if (!confirm(`${md(d)} 일러스트를 ${b.dataset.again ? '다시 ' : ''}요청할까요?\nClaude Code가 Figma로 그려요 (Figma AI 크레딧 1회 사용).`)) return;
     runIllust([d]);
   });
   $view.querySelectorAll('[data-illus]').forEach(b => b.onclick = () => {
     const ds = JSON.parse(b.dataset.illus);
-    if (!confirm(`일러스트 ${ds.length}장을 만들까요?\n${ds.map(md).join(', ')}\n약 ${WON_PER_IMAGE * ds.length}원 (Gemini)`)) return;
+    if (!confirm(`일러스트 ${ds.length}장을 요청할까요?\n${ds.map(md).join(', ')}\nClaude Code가 Figma로 그려요 (Figma AI 크레딧 ${ds.length}회 사용).`)) return;
     runIllust(ds);
+  });
+  $view.querySelectorAll('[data-cancel]').forEach(b => b.onclick = async () => {
+    try { await cancelIllustration(b.dataset.cancel); toast('요청을 취소했어요.'); } catch (e) { alert(e.message); }
+    render();
   });
   $view.querySelectorAll('[data-style]').forEach(b => b.onclick = async () => {
     if (b.dataset.style === 'ok') {
@@ -283,24 +290,15 @@ function bindIllust() {
       notes.push(note.trim());
       await db.setMeta('illustStyleNotes', notes);
     }
-    if (confirm(`요청을 반영해서 다시 그릴까요?\n1장 · 약 ${WON_PER_IMAGE}원`)) runIllust([b.dataset.d]); else render();
+    if (confirm('요청을 반영해서 다시 그리도록 요청할까요?\n(Figma AI 크레딧 1회 사용)')) runIllust([b.dataset.d]); else render();
   });
 }
 
 async function runIllust(dates) {
-  const el = document.createElement('div');
-  el.className = 'modal busy';
-  el.innerHTML = '<div class="sheet"><h3>일러스트 그리는 중…</h3><p id="illuProg"></p></div>';
-  document.body.appendChild(el);
-  const done = [], fail = [];
-  for (let k = 0; k < dates.length; k++) {
-    el.querySelector('#illuProg').textContent = `${k + 1} / ${dates.length}장 · ${md(dates[k])} · 한 장에 10~30초 걸려요`;
-    try { await makeIllustration(dates[k]); done.push(dates[k]); }
-    catch (e) { fail.push(`${md(dates[k])}: ${e.message}`); if (/키가|비밀번호/.test(e.message)) break; }
-  }
-  el.remove();
-  if (fail.length) alert(`${done.length}장 완성 · ${fail.length}장 실패\n${fail.join('\n')}`);
-  else toast(`일러스트 ${done.length}장을 만들었어요. (약 ${WON_PER_IMAGE * done.length}원)`);
+  const fail = [];
+  for (const d of dates) { try { await requestIllustration(d); } catch (e) { fail.push(`${md(d)}: ${e.message}`); } }
+  if (fail.length) alert(`요청 실패\n${fail.join('\n')}`);
+  else alert(`일러스트 ${dates.length}장을 요청했어요.\n\nClaude Code에 "일러스트 만들어줘"라고 말하면 Figma로 그려서 올려 둘게요. 앱을 다시 열면 자동으로 받아와요.`);
   render();
 }
 
@@ -322,7 +320,7 @@ async function runGenerate(dates, opts = {}) {
     if (fail.length) msg += `\n\n규칙에 맞는 코디를 못 찾은 날:\n${fail.map(([d, e]) => `${md(d)}: ${e.join(', ')}`).join('\n')}\n(옷장에 맞는 옷이 부족하면 생길 수 있어요)`;
     if (r.overlaps.length) msg += `\n\n같은 주 다른 날과 겹치는 옷 (다른 날은 그대로 둬요):\n${r.overlaps.join('\n')}`;
     alert(msg);
-    if (opts.redo && r.saved.length && confirm(`새 코디의 일러스트도 만들까요?\n1장 · 약 ${WON_PER_IMAGE}원 (Gemini)`)) { await runIllust(r.saved); return; }
+    if (opts.redo && r.saved.length && confirm('새 코디의 일러스트도 요청할까요?\n(Claude Code가 Figma로 그려요)')) { await runIllust(r.saved); return; }
   } catch (e) {
     el.remove();
     alert(`코디를 짜지 못했어요.\n${e.message}`);
@@ -338,6 +336,7 @@ async function sync({ manual = false } = {}) {
     if (manual || !w || Date.now() - new Date(w.fetchedAt) > 3600000) await db.setMeta('weather', await fetchWeather());
   } catch (e) { if (manual) toast(e.message); }
   if (!(await db.getMeta('appKey'))) { state.syncError = null; return; }
+  try { const got = await pullIllustrations(); if (got) toast(`새 일러스트 ${got}장을 받아왔어요.`); } catch {}
 
   const cur = weekOf(t), next = weekOf(addDays(cur.end, 1));
   const dates = [...cur.days, ...next.days];
