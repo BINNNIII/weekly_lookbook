@@ -8,7 +8,7 @@ import { fetchWeather, commuteTemp } from './weather.js';
 import { generate, estimateWon } from './engine.js';
 import { requestIllustration, cancelIllustration, pullIllustrations } from './illust.js';
 
-const APP_VERSION = 'v9';
+const APP_VERSION = 'v10';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
@@ -323,7 +323,7 @@ async function runGenerate(dates, opts = {}) {
     if (opts.redo && r.saved.length && confirm('새 코디의 일러스트도 요청할까요?\n(Claude Code가 Figma로 그려요)')) { await runIllust(r.saved); return; }
   } catch (e) {
     el.remove();
-    alert(`코디를 짜지 못했어요.\n${e.message}`);
+    alert(`코디를 짜지 못했어요.\n${e.message}${/비밀번호/.test(e.message) ? '\n\n→ Claude가 준 연결 링크를 다시 한 번 눌러 주세요. (설정 → 캘린더 · 날씨 연결에서 끝 4자리를 확인할 수 있어요)' : ''}`);
   }
   render();
 }
@@ -606,7 +606,8 @@ async function renderSettings() {
       ${snap?.errors?.length ? `<p class="hint warn-hint">읽지 못한 캘린더: ${esc(snap.errors.join(', '))}</p>` : ''}
       <p class="hint">마지막 캘린더 확인 ${when(snap?.checkedAt)} · 날씨 ${when(wx?.fetchedAt)} (서울, Open-Meteo)</p>
       <div class="row"><button class="btn" id="syncNow">지금 확인</button></div>
-      <div class="set-row"><input class="inp" id="keyIn" placeholder="${key ? '앱 비밀번호 저장됨 (바꿀 때만 입력)' : '앱 비밀번호 붙여 넣기'}" style="font-size:13px"><button class="small-btn" id="keySave">저장</button></div></div>
+      <p class="hint">${key ? `저장된 연결 비밀번호: …${esc(key.slice(-4))}` : ''} · 연결 링크를 다시 누르면 자동으로 바뀌어요.</p>
+      <div class="set-row"><input class="inp" id="keyIn" placeholder="연결 링크 또는 비밀번호 붙여 넣기 (API 키 X)" style="font-size:13px"><button class="small-btn" id="keySave">저장</button></div></div>
     <div class="panel"><h3>내 코디 규칙</h3>
       <p>코디를 짤 때 AI가 꼭 참고해요. 예: "금요일엔 바지", "빨간 가디건은 휴무일에만"</p>
       <ul class="rules">${custom.map(r => `<li><span>${esc(r.text)}</span><button class="small-btn" data-del="${r.id}">삭제</button></li>`).join('') || '<li class="empty">아직 없어요</li>'}</ul>
@@ -641,8 +642,11 @@ async function renderSettings() {
     renderSettings();
   };
   $view.querySelector('#keySave').onclick = async () => {
-    const v = $view.querySelector('#keyIn').value.trim();
+    let v = $view.querySelector('#keyIn').value.trim();
+    const m = v.match(/key=([A-Za-z0-9_-]+)/); if (m) v = m[1]; // 연결 링크를 통째로 붙여도 됨
     if (!v) return toast('비밀번호를 붙여 넣어 주세요.');
+    if (/^(sk-ant|AIza)/.test(v)) return alert('이건 Anthropic·Google API 키예요. 여기에는 넣지 않아요.\n연결 비밀번호는 Claude가 준 연결 링크의 "#key=" 뒷부분이에요.');
+    if (!/^[A-Za-z0-9_-]{16,64}$/.test(v)) return alert('연결 비밀번호 형식이 아니에요. 연결 링크를 다시 눌러 주세요.');
     await db.setMeta('appKey', v); await sync({ manual: true }); renderSettings();
   };
   $view.querySelector('#exp').onclick = async () => {
@@ -676,7 +680,9 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.se
 async function takeKeyFromLink() {
   const m = location.hash.match(/key=([^&]+)/);
   if (!m) return false;
-  await db.setMeta('appKey', decodeURIComponent(m[1]));
+  const k = decodeURIComponent(m[1]).replace(/[^A-Za-z0-9_-]/g, '');
+  if (!k) return false;
+  await db.setMeta('appKey', k);
   history.replaceState(null, '', location.pathname + location.search);
   toast('캘린더 연결 비밀번호를 저장했어요.');
   return true;

@@ -1,5 +1,5 @@
 // 백업 내보내기 / 불러오기
-import { dumpAll, replaceAll } from './db.js';
+import { dumpAll, replaceAll, getMeta } from './db.js';
 
 const APP = 'weekly-lookbook';
 
@@ -61,7 +61,12 @@ export async function readBackupFile(file) {
 }
 
 export async function importBackup(data) {
-  await replaceAll(toStores(data));
+  const stores = toStores(data);
+  if (!stores.meta.some(m => m.key === 'appKey')) {
+    const cur = await getMeta('appKey');
+    if (cur) stores.meta.push({ key: 'appKey', value: cur }); // 백업에 연결 비밀번호가 없으면 지금 것 유지
+  }
+  await replaceAll(stores);
 }
 
 export function summarize(data) {
