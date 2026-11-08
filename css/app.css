@@ -145,3 +145,14 @@ button.cloth{padding:0;text-align:left;font:inherit;color:inherit}
 .redo{font-size:12.5px;color:var(--off);background:#fbeee3;border-radius:10px;padding:8px 10px;margin-bottom:10px}
 .warn-hint{color:var(--off)}
 .sync-err{font-size:12.5px;color:var(--off);margin:-6px 0 12px}
+
+/* 코디 짜기 · 내 규칙 */
+.lb-small{font-size:13px;font-weight:500;margin:18px 0 0}
+.rules{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:6px}
+.rules li{display:flex;gap:10px;align-items:center;justify-content:space-between;background:var(--bg);border-radius:10px;padding:8px 10px;font-size:13.5px}
+.rules li.empty{color:var(--sub)}
+.base-rules{margin-top:14px;font-size:13px;color:var(--sub)}
+.base-rules summary{cursor:pointer}
+.base-rules ul{padding-left:18px;margin:8px 0}
+.base-rules li{margin-bottom:4px}
+.busy .sheet{border-radius:22px;margin:0 16px 40vh}

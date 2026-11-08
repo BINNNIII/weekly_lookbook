@@ -62,3 +62,12 @@ export function diffDays(oldDays, nowDays, fromDate) {
   return changes.sort((a, b) => a.date.localeCompare(b.date));
 }
 const label = c => (c === '휴무' ? '휴무' : `${c}근무`);
+
+export async function workerPost(path, body) {
+  const key = await db.getMeta('appKey');
+  if (!key) throw new Error('앱 비밀번호가 아직 없어요. 설정에서 연결해 주세요.');
+  const r = await fetch(WORKER_URL + path, { method: 'POST', headers: { 'x-app-key': key, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `연결 오류 (${r.status})`);
+  return data;
+}
