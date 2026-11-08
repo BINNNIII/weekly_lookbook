@@ -6,8 +6,9 @@ import { shrinkPhoto } from './photo.js';
 import { workerFetch, buildDays, diffDays, WORKER_URL } from './calendar.js';
 import { fetchWeather, commuteTemp } from './weather.js';
 import { generate, estimateWon } from './engine.js';
+import { makeIllustration, WON_PER_IMAGE } from './illust.js';
 
-const APP_VERSION = 'v7';
+const APP_VERSION = 'v8';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
@@ -65,9 +66,11 @@ async function renderWeek() {
   const past = state.weekView === 'prev';
   const w = past ? weekOf(addDays(weekOf(t).start, -1)) : weekOf(t);
   const byId = Object.fromEntries(items.map(i => [i.id, i]));
-  const outfits = Object.fromEntries((await db.getAll('outfits')).filter(o => w.days.includes(o.date)).map(o => [o.date, o]));
-  const illus = Object.fromEntries((await db.getAll('illustrations')).filter(x => w.days.includes(x.date)).map(x => [x.date, x]));
-  if (!state.selected || !w.days.includes(state.selected)) {
+  const preview = past ? null : weekOf(addDays(w.end, 1)).start; // 다음 주 첫날 미리보기
+  const shown = preview ? [...w.days, preview] : w.days;
+  const outfits = Object.fromEntries((await db.getAll('outfits')).filter(o => shown.includes(o.date)).map(o => [o.date, o]));
+  const illus = Object.fromEntries((await db.getAll('illustrations')).filter(x => shown.includes(x.date)).map(x => [x.date, x]));
+  if (!state.selected || !shown.includes(state.selected)) {
     state.selected = past ? (w.days.find(d => outfits[d]) || w.start) : t;
   }
   const sel = state.selected;
@@ -87,18 +90,20 @@ async function renderWeek() {
   }
 
   if (!past && state.syncError) html += `<p class="sync-err">캘린더 확인 실패: ${esc(state.syncError)}</p>`;
-  html += o ? await dayCard(sel, o, illus[sel], byId, !past && sel === t, info(sel), past ? null : wxAll[sel])
+  if (sel === preview) html += `<p class="preview-note">다음 주 첫날 미리보기예요 (${md(preview)} ${DOW_KO[weekday(preview)]}).</p>`;
+  html += o ? await dayCard(sel, o, illus[sel], byId, !past && sel === t, info(sel), past ? null : wxAll[sel], past)
             : (past ? `<div class="panel"><h3>${md(sel)} (${DOW_KO[weekday(sel)]}) · N/A</h3><p>이 날은 코디 기록이 없어요.</p></div>` : emptyDay(sel, t, info(sel), wxAll[sel]));
 
   html += `<p class="section">${past ? '저번 주' : '이번 주'} 코디 <span class="hint">${md(w.start)}~${md(w.end)} · 옆으로 넘겨 보세요</span></p><div class="strip">`;
-  for (const d of w.days) {
+  for (const d of shown) {
+    if (d === preview) html += '<div class="strip-sep">다음 주</div>';
     const od = outfits[d], il = illus[d];
     const code = info(d)?.workCode || '';
-    html += `<button class="mini ${d === sel ? 'sel' : ''}" data-day="${d}">
+    html += `<button class="mini ${d === sel ? 'sel' : ''} ${d === preview ? 'preview' : ''}" data-day="${d}">
       ${il ? `<img src="${il.image}" alt="">` : `<div class="ph">${od ? '일러스트 없음' : '코디 없음'}</div>`}
       <div class="mb"><div class="md"><span><span class="d">${md(d)}</span> <span class="w">${DOW_EN[weekday(d)]}</span></span>
       ${code ? `<span class="t ${isOff(code) ? 'off' : ''}">${esc(code)}</span>` : ''}</div>
-      <p class="mo">${od ? esc(od.mood) : (past ? 'N/A' : (d === t ? '오늘' : '&nbsp;'))}</p></div></button>`;
+      <p class="mo">${d === preview ? '미리보기' + (od ? ' · ' + esc(od.mood) : ' · 아직 없음') : od ? esc(od.mood) : (past ? 'N/A' : (d === t ? '오늘' : '&nbsp;'))}</p></div></button>`;
   }
   html += '</div>';
   if (!past) html += await planPanels(t, w, outfits);
@@ -114,6 +119,7 @@ async function renderWeek() {
   bindSeg();
   if (!past && o && sel === t) bindFeedback(sel, o);
   $view.querySelectorAll('[data-gen]').forEach(b => b.onclick = () => askGenerate(JSON.parse(b.dataset.gen), b.dataset.label));
+  bindIllust();
   if (past) $view.querySelector('#delPrev').onclick = async () => {
     if (!confirm(`${md(w.start)}~${md(w.end)} 코디 기록을 삭제할까요?\n삭제하면 되돌릴 수 없어요. (필요하면 먼저 백업을 내보내 두세요)`)) return;
     for (const d of w.days) { await db.del('outfits', d); await db.del('illustrations', d); }
@@ -146,7 +152,7 @@ function liveWx(w, schedule = []) {
   return parts.join(' · ');
 }
 
-async function dayCard(d, o, il, byId, isToday, inf, wx) {
+async function dayCard(d, o, il, byId, isToday, inf, wx, isPast = false) {
   const code = inf?.workCode || o.workCode;
   const schedule = inf?.schedule || o.schedule || [];
   const wxLine = wx ? liveWx(wx, schedule) : wxText(o.weather);
@@ -173,7 +179,8 @@ async function dayCard(d, o, il, byId, isToday, inf, wx) {
   return `<article class="day">
     <div class="stage"><div class="meta"><span class="date">${md(d)}</span><span class="dow">${DOW_EN[weekday(d)]}</span>${isToday ? '<span class="today-mark">오늘</span>' : ''}</div>
       <span class="tag ${isOff(code) ? 'off' : ''}">${isOff(code) ? '휴무' : '출근 ' + esc(code)}</span>
-      ${il ? `<img class="illu" src="${il.image}" alt="코디 일러스트">` : '<div class="illu illu-empty">일러스트가 아직 없어요<br>(6단계에서 Gemini로 생성)</div>'}
+      ${il ? `<img class="illu" src="${il.image}" alt="코디 일러스트">` : `<div class="illu illu-empty">일러스트가 아직 없어요${isPast ? '' : `<br><button class="btn ghost small" data-illu="${d}">일러스트 만들기 (약 ${WON_PER_IMAGE}원)</button>`}</div>`}
+      ${il && !isPast ? await illuControls(d, il) : ''}
       <div class="mood"><span>${esc(o.mood)}</span><span class="pal">${(o.palette || []).map(c => `<i style="background:${esc(c)}"></i>`).join('')}</span></div>
     </div>
     <div class="info">${o.needsRedo ? '<p class="redo">일정이 바뀌어서 이 날 코디를 다시 짜야 해요. (5단계에서 자동으로 다시 짜요)</p>' : ''}
@@ -219,11 +226,82 @@ async function planPanels(t, w, outfits) {
     h += `<div class="panel" style="margin-top:16px"><h3>이번 주 코디 짜기</h3>
       <p>코디 없는 날 ${pend.length - redo}일${redo ? ` · 일정 바뀐 날 ${redo}일` : ''} (${pend.map(md).join(', ')})</p>${btn(pend, `${pend.length}일 코디 짜기`)}</div>`;
   }
+  h += await illuPanel(w.days.filter(d => d >= t && outfits[d] && !outfits[d].needsRedo), '이번 주');
   h += `<div class="panel" style="margin-top:12px"><h3>다음 주 (${md(nw.start)}~${md(nw.end)})</h3>`;
   h += nPend.length
     ? `<p>${nPend.length === nw.days.length ? '아직 안 짰어요.' : `${nPend.length}일이 남았어요.`} 미리 짜 두면 다음 주에 보여요.</p>${btn(nPend, '다음 주 코디 미리 짜기')}`
     : '<p>✓ 다음 주 코디가 준비돼 있어요. 다음 주가 되면 보여요.</p>';
+  const nIll = new Set((await db.getAll('illustrations')).map(x => x.date));
+  const nNeed = nw.days.filter(d => nOut[d] && !nOut[d].needsRedo && !nIll.has(d));
+  if (!nPend.length && nNeed.length && (await db.getMeta('illustStyleApproved'))) h += illuBtn(nNeed, '다음 주 일러스트 만들기');
   return h + '</div>';
+}
+
+// ---------- 일러스트 ----------
+const illuBtn = (dates, label) => `<button class="btn ${label.includes('샘플') ? '' : 'ghost'}" style="margin-top:10px" data-illus='${JSON.stringify(dates)}'>${esc(label)} ${dates.length > 1 ? dates.length + '장 ' : ''}(약 ${WON_PER_IMAGE * dates.length}원)</button>`;
+
+async function illuPanel(days, label) {
+  const ill = new Set((await db.getAll('illustrations')).map(x => x.date));
+  const need = days.filter(d => !ill.has(d));
+  if (!need.length) return '';
+  const approved = await db.getMeta('illustStyleApproved');
+  return `<div class="panel" style="margin-top:12px"><h3>${label} 일러스트</h3>
+    ${approved
+      ? `<p>일러스트가 없는 날 ${need.length}일 (${need.map(md).join(', ')})</p>${illuBtn(need, `${label} 일러스트 만들기`)}`
+      : `<p>새 그림체라서 먼저 1장만 만들어 볼게요. 마음에 들면 나머지를 한 번에 만들 수 있어요.</p>${illuBtn([need[0]], `${md(need[0])} 샘플 1장 만들기`)}`}</div>`;
+}
+
+async function illuControls(d, il) {
+  const approved = await db.getMeta('illustStyleApproved');
+  if (il.sample && !approved) return `<div class="style-ask"><p>이 그림체 어때요?</p>
+    <div class="row"><button class="btn small" data-style="ok">좋아요, 이 스타일로</button><button class="btn ghost small" data-style="no" data-d="${d}">별로예요</button></div></div>`;
+  return `<button class="link-btn" data-illu="${d}" data-again="1">다시 그리기 (약 ${WON_PER_IMAGE}원)</button>`;
+}
+
+function bindIllust() {
+  $view.querySelectorAll('[data-illu]').forEach(b => b.onclick = () => {
+    const d = b.dataset.illu;
+    if (!confirm(`${md(d)} 일러스트를 ${b.dataset.again ? '다시 ' : ''}만들까요?\n1장 · 약 ${WON_PER_IMAGE}원 (Gemini)`)) return;
+    runIllust([d]);
+  });
+  $view.querySelectorAll('[data-illus]').forEach(b => b.onclick = () => {
+    const ds = JSON.parse(b.dataset.illus);
+    if (!confirm(`일러스트 ${ds.length}장을 만들까요?\n${ds.map(md).join(', ')}\n약 ${WON_PER_IMAGE * ds.length}원 (Gemini)`)) return;
+    runIllust(ds);
+  });
+  $view.querySelectorAll('[data-style]').forEach(b => b.onclick = async () => {
+    if (b.dataset.style === 'ok') {
+      await db.setMeta('illustStyleApproved', true);
+      for (const x of await db.getAll('illustrations')) if (x.sample) await db.put('illustrations', { ...x, sample: false });
+      toast('이 그림체로 확정했어요. 이제 일주일치를 한 번에 만들 수 있어요.');
+      return render();
+    }
+    const note = prompt('어떤 점이 별로였나요? 다음 그림에 반영할게요.\n예: 더 손그림 느낌으로, 얼굴을 더 작게, 옷 색이 달라요');
+    if (note === null) return;
+    if (note.trim()) {
+      const notes = (await db.getMeta('illustStyleNotes')) || [];
+      notes.push(note.trim());
+      await db.setMeta('illustStyleNotes', notes);
+    }
+    if (confirm(`요청을 반영해서 다시 그릴까요?\n1장 · 약 ${WON_PER_IMAGE}원`)) runIllust([b.dataset.d]); else render();
+  });
+}
+
+async function runIllust(dates) {
+  const el = document.createElement('div');
+  el.className = 'modal busy';
+  el.innerHTML = '<div class="sheet"><h3>일러스트 그리는 중…</h3><p id="illuProg"></p></div>';
+  document.body.appendChild(el);
+  const done = [], fail = [];
+  for (let k = 0; k < dates.length; k++) {
+    el.querySelector('#illuProg').textContent = `${k + 1} / ${dates.length}장 · ${md(dates[k])} · 한 장에 10~30초 걸려요`;
+    try { await makeIllustration(dates[k]); done.push(dates[k]); }
+    catch (e) { fail.push(`${md(dates[k])}: ${e.message}`); if (/키가|비밀번호/.test(e.message)) break; }
+  }
+  el.remove();
+  if (fail.length) alert(`${done.length}장 완성 · ${fail.length}장 실패\n${fail.join('\n')}`);
+  else toast(`일러스트 ${done.length}장을 만들었어요. (약 ${WON_PER_IMAGE * done.length}원)`);
+  render();
 }
 
 function askGenerate(dates, label) {
@@ -244,6 +322,7 @@ async function runGenerate(dates, opts = {}) {
     if (fail.length) msg += `\n\n규칙에 맞는 코디를 못 찾은 날:\n${fail.map(([d, e]) => `${md(d)}: ${e.join(', ')}`).join('\n')}\n(옷장에 맞는 옷이 부족하면 생길 수 있어요)`;
     if (r.overlaps.length) msg += `\n\n같은 주 다른 날과 겹치는 옷 (다른 날은 그대로 둬요):\n${r.overlaps.join('\n')}`;
     alert(msg);
+    if (opts.redo && r.saved.length && confirm(`새 코디의 일러스트도 만들까요?\n1장 · 약 ${WON_PER_IMAGE}원 (Gemini)`)) { await runIllust(r.saved); return; }
   } catch (e) {
     el.remove();
     alert(`코디를 짜지 못했어요.\n${e.message}`);
