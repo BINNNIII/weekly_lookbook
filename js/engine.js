@@ -1,6 +1,8 @@
 // 코디 짜기: 규칙으로 후보 거르기 → Claude(Sonnet 5.5)가 고르기 → 규칙으로 다시 검사 → 저장
 import * as db from './db.js';
-import { candidates, validateOutfit, dayRuleText, outerNeed } from './rules.js';
+import { candidates, validateOutfit, dayRuleText, outerNeed, morningTemp } from './rules.js';
+import { pickFav, condOf, condLabel } from './looks.js';
+import { cancelIllustration } from './illust.js';
 import { workerPost } from './calendar.js';
 import { weekOf, weekday, addDays } from './weekRange.js';
 import { commuteTemp } from './weather.js';
@@ -116,11 +118,27 @@ async function callAI(prompt) {
 }
 
 // dates: 짤 날짜들, opts.reason: 재코디 이유, opts.redo: 재코디 여부
-export async function generate(dates, opts = {}) {
+export async function generate(allDates, opts = {}) {
   const items = await db.getAll('items');
   const byId = Object.fromEntries(items.map(i => [i.id, i]));
   const ctxs = {};
-  for (const d of dates) ctxs[d] = await dayContext(d);
+  for (const d of allDates) ctxs[d] = await dayContext(d);
+
+  // '또 입기' 찜 코디: 비슷한 날이면 AI 없이 그대로 입힌다 (재코디 때는 안 씀)
+  const favPicked = {};
+  if (!opts.redo) {
+    const favs = (await db.getAll('feedback')).filter(f => f.kind === 'fav');
+    const others = (await db.getAll('outfits')).filter(o => !allDates.includes(o.date));
+    for (const d of allDates) {
+      if (!favs.length) break;
+      const near = [...others, ...Object.entries(favPicked).map(([date, f]) => ({ date, items: f.itemIds }))];
+      const f = pickFav(favs, d, ctxs[d], items, near);
+      if (f) { favPicked[d] = f; await wearFav(d, f, ctxs[d]); }
+    }
+  }
+  const dates = allDates.filter(d => !favPicked[d]);
+  const favSaved = Object.keys(favPicked);
+  if (!dates.length) return { saved: favSaved, favSaved, failed: {}, won: 0, overlaps: [] };
 
   // 같은 주의 다른 날 코디 (반복 피하기·참고용)
   const weeks = [...new Set(dates.map(d => weekOf(d).start))].map(s => weekOf(s));
@@ -170,6 +188,7 @@ export async function generate(dates, opts = {}) {
       date: d, workCode: c.workCode, schedule: c.schedule,
       weather: c.min != null ? { icon: (c.summary || '').split(' ')[0], summary: (c.summary || '').split(' ').slice(1).join(' '), min: c.min, max: c.max, pop: c.pop ?? null, extra: null } : old?.weather || null,
       items: [...new Set(a.items)], mood: a.mood, palette: a.palette.slice(0, 3), reason: a.reason,
+      morning: morningTemp(c) ?? null,
       status: '자동', source: opts.redo ? '재코디' : 'AI', createdAt: now, needsRedo: false,
       history: old ? [...(old.history || []), { items: old.items, mood: old.mood, at: old.createdAt || null, reason: opts.redo ? opts.reason || '' : '일정 변경' }].slice(-5) : [],
     });
@@ -186,5 +205,34 @@ export async function generate(dates, opts = {}) {
       for (const id of same) overlaps.push(`${byId[id].name} → ${md(o.date)}에도 있어요`);
     }
   }
-  return { saved: Object.keys(results), failed, won: total, overlaps };
+  return { saved: [...favSaved, ...Object.keys(results)], favSaved, failed, won: total, overlaps };
+}
+
+const weatherOf = (c, old) => c.min != null
+  ? { icon: (c.summary || '').split(' ')[0], summary: (c.summary || '').split(' ').slice(1).join(' '), min: c.min, max: c.max, pop: c.pop ?? null, extra: null }
+  : old?.weather || null;
+
+// 찜 코디를 그 날에 입히기. 찜할 때 그림이 있었으면 그림도 그대로 복사 (새로 그리지 않음)
+export async function wearFav(d, f, ctx) {
+  const c = ctx || await dayContext(d);
+  const old = await db.get('outfits', d);
+  await db.put('outfits', {
+    date: d, workCode: c.workCode, schedule: c.schedule, weather: weatherOf(c, old),
+    items: [...f.itemIds], mood: f.mood, palette: f.palette || [],
+    reason: `${md(f.date)}에 입었던 찜 코디예요. ${condLabel(condOf(c))}이라 다시 골랐어요.`,
+    morning: morningTemp(c) ?? null,
+    status: '자동', source: '또 입기', favId: f.id, createdAt: new Date().toISOString(), needsRedo: false,
+    history: old ? [...(old.history || []), { items: old.items, mood: old.mood, at: old.createdAt || null, reason: '또 입기' }].slice(-5) : [],
+  });
+  const key = f.itemIds.join(',');
+  const src = await db.get('illustrations', f.date);
+  const img = src && !src.stale && (!src.itemsKey || src.itemsKey === key) ? src : f.image ? { image: f.image, model: 'copy', itemsKey: key } : null;
+  if (img) {
+    await db.put('illustrations', { date: d, image: img.image, model: img.model, createdAt: new Date().toISOString(), itemsKey: key, sample: false, stale: false, copiedFrom: f.date });
+    if (((await db.getMeta('illustPending')) || []).includes(d)) { try { await cancelIllustration(d); } catch {} }
+  } else {
+    const il = await db.get('illustrations', d);
+    if (il) await db.put('illustrations', { ...il, stale: true });
+  }
+  return !!img;
 }

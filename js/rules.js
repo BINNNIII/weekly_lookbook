@@ -21,11 +21,14 @@ export function morningTemp(ctx) {
 export function outerNeed(ctx) {
   const t = morningTemp(ctx);
   if (t == null) return { need: null, maxAllowed: 3, temp: null };
-  const work = isWorkday(ctx.workCode);
-  const thick = work ? 5 : 2;      // 이 기온 이하면 두꺼운 아우터 필수
-  let need = t <= thick ? 3 : t <= 12 ? 2 : t <= 17 ? 1 : 0;
+  const need = needFor(t, isWorkday(ctx.workCode));
   const maxAllowed = t >= 13 ? 2 : 3; // 아침 13℃ 이상이면 두꺼운 코트·패딩은 과함
   return { need, maxAllowed, temp: t };
+}
+// 아침 기온 → 기온 구간 (3 아주 추움 · 2 쌀쌀 · 1 선선 · 0 따뜻). '또 입기'도 이 구간으로 비슷한 날을 찾는다
+export function needFor(t, work) {
+  const thick = work ? 5 : 2;      // 이 기온 이하면 두꺼운 아우터 필수
+  return t <= thick ? 3 : t <= 12 ? 2 : t <= 17 ? 1 : 0;
 }
 
 // 날짜 하나의 상황

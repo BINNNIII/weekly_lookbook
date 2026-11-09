@@ -5,18 +5,19 @@ import { CATEGORIES, LENGTHS, THICKNESS, BAG_SIZES, FORMALITY, suggest, required
 import { shrinkPhoto } from './photo.js';
 import { workerFetch, buildDays, diffDays, WORKER_URL } from './calendar.js';
 import { fetchWeather, commuteTemp } from './weather.js';
-import { generate, dayContext } from './engine.js';
+import { generate, dayContext, wearFav } from './engine.js';
+import { condOf, condLabel, pickFav } from './looks.js';
 import { validateOutfit } from './rules.js';
 import { requestIllustration, pullIllustrations } from './illust.js';
 
-const APP_VERSION = 'v12';
+const APP_VERSION = 'v13';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 const DOW_KO = ['일', '월', '화', '수', '목', '금', '토'];
 const MONTH_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-const state = { autoBusy: false, autoError: null, tab: 'week', weekView: 'this', selected: null, closetCat: '전체', closetMode: null, closetScroll: 0, syncError: null };
+const state = { autoBusy: false, autoError: null, tab: 'week', selected: null, swipeDir: 0, archFilter: '전체', archOpen: null, archScroll: 0, closetCat: '전체', closetMode: null, closetScroll: 0, syncError: null };
 
 // ---------- 공통 ----------
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -64,16 +65,13 @@ async function renderWeek() {
   if (!items.length) return renderOnboarding();
 
   const t = await today();
-  const past = state.weekView === 'prev';
-  const w = past ? weekOf(addDays(weekOf(t).start, -1)) : weekOf(t);
+  const w = weekOf(t);
   const byId = Object.fromEntries(items.map(i => [i.id, i]));
-  const preview = past ? null : weekOf(addDays(w.end, 1)).start; // 다음 주 첫날 미리보기
-  const shown = preview ? [...w.days, preview] : w.days;
+  const preview = weekOf(addDays(w.end, 1)).start; // 다음 주 첫날 미리보기
+  const shown = [...w.days, preview];
   const outfits = Object.fromEntries((await db.getAll('outfits')).filter(o => shown.includes(o.date)).map(o => [o.date, o]));
   const illus = Object.fromEntries((await db.getAll('illustrations')).filter(x => shown.includes(x.date)).map(x => [x.date, x]));
-  if (!state.selected || !shown.includes(state.selected)) {
-    state.selected = past ? (w.days.find(d => outfits[d]) || w.start) : t;
-  }
+  if (!state.selected || !shown.includes(state.selected)) state.selected = t;
   const sel = state.selected;
   const o = outfits[sel];
   const live = (await db.getMeta('calendarSnapshot'))?.days || {};
@@ -81,21 +79,13 @@ async function renderWeek() {
   const info = d => live[d] ? { workCode: live[d].workCode, schedule: live[d].schedule, live: true }
     : outfits[d] ? { workCode: outfits[d].workCode, schedule: outfits[d].schedule || [] } : null;
 
-  let html = `<p class="eyebrow">Weekly Lookbook${past ? ' · Last Week' : ''}</p><h1 class="title">${weekTitle(w)}</h1>
-    <div class="seg"><button data-wv="this" class="${past ? '' : 'on'}">이번 주</button><button data-wv="prev" class="${past ? 'on' : ''}">저번 주</button></div>`;
-
-  if (past && !Object.keys(outfits).length) {
-    $view.innerHTML = html + `<div class="panel"><h3>N/A</h3><p>저번 주(${md(w.start)}~${md(w.end)}) 코디 기록이 없어요.</p></div>`;
-    bindSeg();
-    return;
-  }
-
-  if (!past && state.syncError) html += `<p class="sync-err">캘린더 확인 실패: ${esc(state.syncError)}</p>`;
+  let html = `<p class="eyebrow">Weekly Lookbook</p><h1 class="title">${weekTitle(w)}</h1>`;
+  if (state.syncError) html += `<p class="sync-err">캘린더 확인 실패: ${esc(state.syncError)}</p>`;
   if (sel === preview) html += `<p class="preview-note">다음 주 첫날 미리보기예요 (${md(preview)} ${DOW_KO[weekday(preview)]}).</p>`;
-  html += o ? await dayCard(sel, o, illus[sel], byId, !past && sel === t, info(sel), past ? null : wxAll[sel], past)
-            : (past ? `<div class="panel"><h3>${md(sel)} (${DOW_KO[weekday(sel)]}) · N/A</h3><p>이 날은 코디 기록이 없어요.</p></div>` : emptyDay(sel, t, info(sel), wxAll[sel]));
+  html += o ? await dayCard(sel, o, illus[sel], byId, { isToday: sel === t, canEdit: sel >= t, inf: info(sel), wx: wxAll[sel] })
+            : emptyDay(sel, t, info(sel), wxAll[sel]);
 
-  html += `<p class="section">${past ? '저번 주' : '이번 주'} 코디 <span class="hint">${md(w.start)}~${md(w.end)} · 옆으로 넘겨 보세요</span></p><div class="strip">`;
+  html += `<p class="section">이번 주 코디 <span class="hint">${md(w.start)}~${md(w.end)} · 그림을 옆으로 밀어도 넘어가요</span></p><div class="strip">`;
   for (const d of shown) {
     if (d === preview) html += '<div class="strip-sep">다음 주</div>';
     const od = outfits[d], il = illus[d];
@@ -104,45 +94,66 @@ async function renderWeek() {
       ${il ? `<img src="${il.image}" alt="">` : `<div class="ph">${od ? '일러스트 없음' : '코디 없음'}</div>`}
       <div class="mb"><div class="md"><span><span class="d">${md(d)}</span> <span class="w">${DOW_EN[weekday(d)]}</span></span>
       ${code ? `<span class="t ${isOff(code) ? 'off' : ''}">${esc(code)}</span>` : ''}</div>
-      <p class="mo">${d === preview ? '미리보기' + (od ? ' · ' + esc(od.mood) : ' · 아직 없음') : od ? esc(od.mood) : (past ? 'N/A' : (d === t ? '오늘' : '&nbsp;'))}</p></div></button>`;
+      <p class="mo">${d === preview ? '미리보기' + (od ? ' · ' + esc(od.mood) : ' · 아직 없음') : od ? esc(od.mood) : (d === t ? '오늘' : '&nbsp;')}</p></div></button>`;
   }
   html += '</div>';
-  if (!past) html += await planPanels(t, w, outfits);
-  if (past) {
-    html += `<div class="panel" style="margin-top:20px"><h3>저번 주 기록 삭제</h3>
-      <p>${md(w.start)}~${md(w.end)}의 코디와 일러스트를 지워요. 좋아요/별로예요 피드백은 다음 코디에 계속 반영되도록 남겨 둬요.</p>
-      <button class="btn ghost" id="delPrev">이 주 기록 삭제</button></div>`;
-  }
+  html += await planPanels(t, w, outfits);
   $view.innerHTML = html;
+  animateIn();
 
   $view.querySelectorAll('.mini').forEach(b => b.onclick = () => { state.selected = b.dataset.day; renderWeek(); scrollTo({ top: 0, behavior: 'smooth' }); });
   const sel0 = $view.querySelector('.mini.sel'); if (sel0) sel0.scrollIntoView({ inline: 'center', block: 'nearest' });
-  bindSeg();
-  if (!past && o && sel === t) bindFeedback(sel, o);
-  if (!past && o && sel >= t) bindEdit(sel, o, byId);
+  bindSwipe($view.querySelector('.day, .panel.empty-day'), dir => {
+    const n = shown[shown.indexOf(sel) + dir];
+    if (!n) return false;
+    state.selected = n; state.swipeDir = dir; renderWeek();
+    return true;
+  });
+  if (o && sel === t) bindFeedback(sel, o);
+  if (o && sel >= t) bindEdit(sel, o, byId);
   const retry = $view.querySelector('#autoRetry');
   if (retry) retry.onclick = () => { state.autoError = null; autoRun(); };
-  if (past) $view.querySelector('#delPrev').onclick = async () => {
-    if (!confirm(`${md(w.start)}~${md(w.end)} 코디 기록을 삭제할까요?\n삭제하면 되돌릴 수 없어요. (필요하면 먼저 백업을 내보내 두세요)`)) return;
-    for (const d of w.days) { await db.del('outfits', d); await db.del('illustrations', d); }
-    toast('저번 주 기록을 삭제했어요.');
-    renderWeek();
-  };
 }
 
-function bindSeg() {
-  $view.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
-    if (state.weekView === b.dataset.wv) return;
-    state.weekView = b.dataset.wv; state.selected = null; renderWeek();
-  });
+// 그림(카드)을 옆으로 밀면 다른 날로. go(+1|-1)이 false를 돌려주면 끝이라 제자리로 돌아온다
+function bindSwipe(el, go) {
+  if (!el) return;
+  let x0 = null, y0 = 0, dx = 0, lock = null;
+  el.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) { x0 = null; return; }
+    x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; lock = null;
+    el.style.transition = 'none';
+  }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    if (x0 == null) return;
+    const mx = e.touches[0].clientX - x0, my = e.touches[0].clientY - y0;
+    if (!lock && (Math.abs(mx) > 10 || Math.abs(my) > 10)) lock = Math.abs(mx) > Math.abs(my) * 1.2 ? 'x' : 'y';
+    if (lock === 'x') { dx = mx; el.style.transform = `translateX(${dx * 0.5}px)`; }
+  }, { passive: true });
+  const end = () => {
+    if (x0 == null) return;
+    x0 = null;
+    el.style.transition = 'transform .18s ease-out';
+    el.style.transform = '';
+    if (lock === 'x' && Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
+  };
+  el.addEventListener('touchend', end);
+  el.addEventListener('touchcancel', end);
+}
+// 넘긴 방향에서 카드가 들어오는 효과
+function animateIn() {
+  const dir = state.swipeDir; state.swipeDir = 0;
+  const el = $view.querySelector('.day, .panel.empty-day');
+  if (!dir || !el) return;
+  el.classList.add(dir > 0 ? 'in-next' : 'in-prev');
 }
 
 function emptyDay(d, t, inf, wx) {
   const code = inf?.workCode;
-  return `<div class="panel"><h3>${md(d)} (${DOW_KO[weekday(d)]})${code ? ` · ${isOff(code) ? '휴무' : '출근 ' + esc(code)}` : ''}</h3>
+  return `<div class="panel empty-day"><h3>${md(d)} (${DOW_KO[weekday(d)]})${code ? ` · ${isOff(code) ? '휴무' : '출근 ' + esc(code)}` : ''}</h3>
     ${inf?.schedule?.length ? `<p class="sched" style="color:var(--ink);margin-top:2px">${inf.schedule.map(esc).join(' · ')}</p>` : ''}
     ${wx ? `<p class="wx" style="margin:2px 0 8px">${esc(liveWx(wx, inf?.schedule))}</p>` : ''}
-    <p>이 날 코디가 아직 없어요. 아래 '코디 짜기'를 누르면 AI가 짜 줘요.</p></div>`;
+    <p>${d < t ? '이 날은 코디 기록이 없어요.' : '이 날 코디가 아직 없어요. 앱이 자동으로 짜 줘요.'}</p></div>`;
 }
 
 function liveWx(w, schedule = []) {
@@ -154,8 +165,9 @@ function liveWx(w, schedule = []) {
   return parts.join(' · ');
 }
 
-async function dayCard(d, o, il, byId, isToday, inf, wx, isPast = false) {
-  const canEdit = !isPast && d >= (await today()); // 오늘과 앞으로의 날은 언제든 재코디·아이템 빼기 가능
+// 하루 카드. opt: { isToday, canEdit(재코디·빼기), inf(캘린더), wx(실시간 날씨), isPast(기록 보기) }
+async function dayCard(d, o, il, byId, opt = {}) {
+  const { isToday = false, canEdit = false, inf = null, wx = null, isPast = false } = opt;
   const code = inf?.workCode || o.workCode;
   const schedule = inf?.schedule || o.schedule || [];
   const wxLine = wx ? liveWx(wx, schedule) : wxText(o.weather);
@@ -167,30 +179,22 @@ async function dayCard(d, o, il, byId, isToday, inf, wx, isPast = false) {
       ${canEdit ? `<button class="it-rm" data-rm="${i.id}" aria-label="${esc(i.name)} 빼기">✕</button>` : ''}</li>`).join('');
   const missing = o.items.filter(id => !byId[id]).length;
   let actions = '';
-  if (isToday) {
-    const fb = await db.get('feedback', `fb-${d}`);
-    actions += `<div class="actions">
-      <div class="fb"><button class="chip ${fb?.kind === 'like' ? 'on' : ''}" data-kind="like">👍 좋아요</button>
-      <button class="chip ${fb?.kind === 'dislike' ? 'on' : ''}" data-kind="dislike">👎 별로예요</button></div>
-      <textarea class="memo" id="fbMemo" rows="1" placeholder="짧은 메모 (선택) — 예: 따뜻하고 편했음">${esc(fb?.text || '')}</textarea>
-      <div class="row"><button class="btn" id="fbSave">피드백 저장</button></div>
-      ${fb ? `<p class="hint">저장됨 · ${new Date(fb.createdAt).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>` : ''}</div>`;
-  }
-  if (canEdit) {
-    actions += `<div class="actions">
-      <p class="lb-small">재코디 · ${md(d)} (${DOW_KO[weekday(d)]})</p>
-      <textarea class="memo" id="redoReason" rows="1" placeholder="바꾸고 싶은 이유 (선택) — 예: 바지 말고 치마"></textarea>
-      <div class="row"><button class="btn ghost" id="redoBtn" data-d="${d}">재코디 요청</button></div>
-      <p class="hint">이 날 코디만 바로 바뀌고, 그림은 새로 그려지면 바뀌어요. 다른 날은 그대로예요. 마음에 들 때까지 몇 번이든 할 수 있어요.</p></div>`;
+  if (isToday || canEdit) {
+    const fb = isToday ? await db.get('feedback', `fb-${d}`) : null;
+    actions = `<div class="actions"><div class="act-row">
+      ${isToday ? `<button class="act ${fb?.kind === 'like' ? 'on' : ''}" data-fb="like">👍 좋아요</button>
+      <button class="act ${fb?.kind === 'dislike' ? 'on' : ''}" data-fb="dislike">👎 별로예요</button>` : ''}
+      ${canEdit ? '<button class="act" id="redoOpen">↻ 재코디</button>' : ''}</div>
+      ${fb ? `<button class="fb-note" id="fbNote">${fb.text ? `메모: ${esc(fb.text)}` : '메모 남기기 (선택)'} ›</button>` : ''}</div>`;
   }
   return `<article class="day">
-    <div class="stage"><div class="meta"><span class="date">${md(d)}</span><span class="dow">${DOW_EN[weekday(d)]}</span>${isToday ? '<span class="today-mark">오늘</span>' : ''}</div>
+    <div class="stage"><div class="meta"><span class="date">${md(d)}</span><span class="dow">${DOW_EN[weekday(d)]}</span>${isToday && !isPast ? '<span class="today-mark">오늘</span>' : ''}</div>
       <span class="tag ${isOff(code) ? 'off' : ''}">${isOff(code) ? '휴무' : '출근 ' + esc(code)}</span>
-      ${il ? `<div class="illu-wrap"><img class="illu ${il.stale ? 'stale' : ''}" src="${il.image}" alt="코디 일러스트">${il.stale && !isPast ? '<span class="illu-badge">재코디 준비 중 · 새 그림이 오면 바뀌어요</span>' : ''}</div>`
+      ${il ? `<div class="illu-wrap"><img class="illu ${il.stale ? 'stale' : ''}" src="${il.image}" alt="코디 일러스트" draggable="false">${il.stale && !isPast ? '<span class="illu-badge">재코디 준비 중 · 새 그림이 오면 바뀌어요</span>' : ''}</div>`
         : `<div class="illu illu-empty">${isPast ? '일러스트 없음' : '그림 준비 중이에요<br><span class="hint">자동으로 그려지면 여기 나와요</span>'}</div>`}
       <div class="mood"><span>${esc(o.mood)}</span><span class="pal">${(o.palette || []).map(c => `<i style="background:${esc(c)}"></i>`).join('')}</span></div>
     </div>
-    <div class="info">${o.needsRedo ? '<p class="redo">일정이 바뀌어서 이 날 코디를 다시 짜는 중이에요.</p>' : ''}
+    <div class="info">${o.needsRedo && !isPast ? '<p class="redo">일정이 바뀌어서 이 날 코디를 다시 짜는 중이에요.</p>' : ''}
       <p class="sched">${schedule.map(esc).join(' · ') || (isOff(code) ? '일정 없음' : '')}</p>
       <p class="wx">${esc(wxLine)}</p>${wxDiff}
       <ul class="items">${list}</ul>
@@ -199,25 +203,75 @@ async function dayCard(d, o, il, byId, isToday, inf, wx, isPast = false) {
     ${actions}</article>`;
 }
 
+// 아래에서 올라오는 팝업. 바깥(어두운 곳)을 누르면 닫힘
+function openSheet(inner) {
+  const el = document.createElement('div');
+  el.className = 'modal';
+  el.innerHTML = `<div class="sheet"><div class="grab"></div>${inner}</div>`;
+  el.onclick = e => { if (e.target === el) el.remove(); };
+  document.body.appendChild(el);
+  return el;
+}
+// 빠른 선택 칩: 누르면 켜고 끄기
+function chipRow(list) {
+  return `<div class="qchips">${list.map(t => `<button class="qchip" data-q="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
+}
+function bindChips(el) {
+  el.querySelectorAll('.qchip').forEach(c => c.onclick = () => c.classList.toggle('on'));
+  return () => [...el.querySelectorAll('.qchip.on')].map(c => c.dataset.q);
+}
+
+const LIKE_Q = ['따뜻했음', '편했음', '색 조합 좋음', '단정했음', '분위기 좋음'];
+const DISLIKE_Q = ['추웠음', '더웠음', '불편했음', '색 조합 별로', '너무 포멀', '너무 캐주얼'];
+const REDO_Q = ['바지로', '치마로', '더 따뜻하게', '더 가볍게', '더 단정하게', '더 캐주얼하게', '다른 색으로', '신발 바꾸기', '가방 바꾸기'];
+
+// 👍·👎는 누르면 바로 저장, 메모는 팝업에서 선택으로
 function bindFeedback(d, o) {
-  let kind = $view.querySelector('.chip.on')?.dataset.kind || null;
-  $view.querySelectorAll('.chip').forEach(c => c.onclick = () => {
-    kind = c.dataset.kind;
-    $view.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === c));
-  });
-  const memo = $view.querySelector('#fbMemo');
-  memo.oninput = () => { memo.style.height = 'auto'; memo.style.height = memo.scrollHeight + 'px'; };
-  $view.querySelector('#fbSave').onclick = async () => {
-    if (!kind) return toast('좋아요 또는 별로예요를 먼저 골라 주세요.');
-    await db.put('feedback', { id: `fb-${d}`, date: d, kind, text: memo.value.trim(), itemIds: o.items, mood: o.mood, createdAt: new Date().toISOString() });
-    toast('피드백을 저장했어요. 다음 코디에 반영돼요.');
-    renderWeek();
+  const save = async (kind, text) => {
+    const old = await db.get('feedback', `fb-${d}`);
+    await db.put('feedback', { id: `fb-${d}`, date: d, kind, text: text ?? (old?.kind === kind ? old.text : ''), itemIds: o.items, mood: o.mood, createdAt: new Date().toISOString() });
   };
+  const memoSheet = async (kind, justSaved) => {
+    const fb = await db.get('feedback', `fb-${d}`);
+    const el = openSheet(`<h3>${kind === 'like' ? '👍 좋아요' : '👎 별로예요'}${justSaved ? '로 저장했어요' : ''}</h3>
+      <p class="sheet-sub">이유를 남기면 다음 코디에 반영돼요 (선택)</p>
+      ${chipRow(kind === 'like' ? LIKE_Q : DISLIKE_Q)}
+      <textarea class="memo" id="fbMemo" rows="2" placeholder="직접 적기 — 예: 오후엔 좀 더웠음">${esc(fb?.text || '')}</textarea>
+      <div class="row"><button class="btn" id="fbSave">메모 저장</button><button class="btn ghost" id="fbClose">닫기</button></div>`);
+    const picked = bindChips(el);
+    el.querySelector('#fbClose').onclick = () => el.remove();
+    el.querySelector('#fbSave').onclick = async () => {
+      const text = [...picked(), el.querySelector('#fbMemo').value.trim()].filter(Boolean).join(', ');
+      await save(kind, text);
+      el.remove(); toast('메모를 저장했어요. 다음 코디에 반영돼요.'); renderWeek();
+    };
+  };
+  $view.querySelectorAll('[data-fb]').forEach(b => b.onclick = async () => {
+    const kind = b.dataset.fb;
+    await save(kind);
+    await renderWeek();
+    memoSheet(kind, true);
+  });
+  const note = $view.querySelector('#fbNote');
+  if (note) note.onclick = async () => memoSheet((await db.get('feedback', `fb-${d}`))?.kind || 'like', false);
 }
 
 function bindEdit(d, o, byId) {
-  const redo = $view.querySelector('#redoBtn');
-  if (redo) redo.onclick = () => runGenerate([d], { redo: true, reason: $view.querySelector('#redoReason').value.trim() });
+  const redo = $view.querySelector('#redoOpen');
+  if (redo) redo.onclick = () => {
+    const el = openSheet(`<h3>${md(d)} (${DOW_KO[weekday(d)]}) 재코디</h3>
+      <p class="sheet-sub">어떻게 바꿀까요? 고르지 않아도 돼요.</p>
+      ${chipRow(REDO_Q)}
+      <textarea class="memo" id="redoReason" rows="2" placeholder="직접 적기 (선택) — 예: 니트 말고 셔츠"></textarea>
+      <div class="row"><button class="btn" id="redoGo">재코디 하기</button></div>
+      <p class="hint">이 날 코디만 바로 바뀌고, 그림은 새로 그려지면 바뀌어요.</p>`);
+    const picked = bindChips(el);
+    el.querySelector('#redoGo').onclick = () => {
+      const reason = [...picked(), el.querySelector('#redoReason').value.trim()].filter(Boolean).join(', ');
+      el.remove();
+      runGenerate([d], { redo: true, reason });
+    };
+  };
   $view.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => {
     const id = b.dataset.rm, it = byId[id];
     if (!confirm(`'${it?.name || id}'을(를) ${md(d)} 코디에서 뺄까요?\n그림도 새로 그려져요.`)) return;
@@ -233,6 +287,141 @@ function bindEdit(d, o, byId) {
     toast(`${it?.name || '아이템'}을(를) 뺐어요. 그림은 새로 그려지면 바뀌어요.`);
     if (errs.length) alert(`참고: 지금 코디는 규칙과 맞지 않는 부분이 있어요.\n${errs.join('\n')}\n\n필요하면 재코디를 눌러 주세요.`);
     renderWeek();
+  });
+}
+
+// ---------- 기록 (역대 코디 · 또 입기) ----------
+const ARCH_FILTERS = ['전체', '♥ 또 입을 코디', '출근', '휴무'];
+async function archiveList() {
+  const t = await today();
+  const favIds = new Set((await db.getAll('feedback')).filter(f => f.kind === 'fav').map(f => f.date));
+  let outs = (await db.getAll('outfits')).filter(o => o.date <= t).sort((a, b) => b.date.localeCompare(a.date));
+  const f = state.archFilter;
+  if (f === '♥ 또 입을 코디') outs = outs.filter(o => favIds.has(o.date));
+  if (f === '출근') outs = outs.filter(o => !isOff(o.workCode));
+  if (f === '휴무') outs = outs.filter(o => isOff(o.workCode));
+  return { t, outs, favIds };
+}
+
+async function renderArchive() {
+  if (state.archOpen) return renderArchiveDay(state.archOpen);
+  const { t, outs, favIds } = await archiveList();
+  const ill = Object.fromEntries((await db.getAll('illustrations')).map(x => [x.date, x]));
+  const thisWeek = weekOf(t).start;
+  let html = `<p class="eyebrow">Archive</p><h1 class="title">지난 코디</h1>
+    <div class="filters">${ARCH_FILTERS.map(x => `<button data-af="${x}" class="${state.archFilter === x ? 'on' : ''}">${x}</button>`).join('')}</div>`;
+  if (!outs.length) {
+    html += `<div class="panel"><p>${state.archFilter === '♥ 또 입을 코디' ? "아직 찜한 코디가 없어요. 코디를 눌러 '나중에 또 이렇게 입기'를 눌러 보세요." : '아직 기록이 없어요.'}</p></div>`;
+  }
+  const weeks = [];
+  for (const o of outs) {
+    const w = weekOf(o.date);
+    if (!weeks.length || weeks[weeks.length - 1].w.start !== w.start) weeks.push({ w, list: [] });
+    weeks[weeks.length - 1].list.push(o);
+  }
+  for (const { w, list } of weeks) {
+    html += `<p class="section">${weekTitle(w)}${w.start === thisWeek ? ' <span class="hint">이번 주</span>' : ''}</p><div class="grid looks">`;
+    for (const o of list) {
+      const il = ill[o.date];
+      html += `<button class="look" data-open="${o.date}">
+        ${il ? `<img src="${il.image}" alt="" loading="lazy">` : '<div class="ph">일러스트 없음</div>'}
+        ${favIds.has(o.date) ? '<span class="heart">♥</span>' : ''}
+        <div class="mb"><div class="md"><span><span class="d">${md(o.date)}</span> <span class="w">${DOW_EN[weekday(o.date)]}</span></span>
+        <span class="t ${isOff(o.workCode) ? 'off' : ''}">${isOff(o.workCode) ? '휴무' : esc(o.workCode)}</span></div>
+        <p class="mo">${esc(o.mood)}</p></div></button>`;
+    }
+    html += '</div>';
+    if (w.start !== thisWeek && state.archFilter === '전체') html += `<button class="link-btn" data-delweek="${w.start}">이 주 기록 지우기</button>`;
+  }
+  $view.innerHTML = html;
+  $view.querySelectorAll('[data-af]').forEach(b => b.onclick = () => { state.archFilter = b.dataset.af; renderArchive(); });
+  $view.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { state.archScroll = scrollY; state.archOpen = b.dataset.open; renderArchive(); scrollTo(0, 0); });
+  $view.querySelectorAll('[data-delweek]').forEach(b => b.onclick = async () => {
+    const w = weekOf(b.dataset.delweek);
+    const keep = w.days.filter(d => favIds.has(d));
+    if (!confirm(`${md(w.start)}~${md(w.end)} 코디 기록을 지울까요?\n되돌릴 수 없어요. (필요하면 먼저 설정 → 백업을 해 두세요)${keep.length ? `\n\n♥ 찜한 코디(${keep.map(md).join(', ')})는 남겨 둬요.` : ''}\n좋아요/별로예요 피드백은 다음 코디에 계속 반영돼요.`)) return;
+    for (const d of w.days) if (!keep.includes(d)) { await db.del('outfits', d); await db.del('illustrations', d); }
+    toast('기록을 지웠어요.');
+    renderArchive();
+  });
+  if (state.archScroll) { scrollTo(0, state.archScroll); state.archScroll = 0; }
+}
+
+async function renderArchiveDay(d) {
+  const { outs } = await archiveList();
+  const o = await db.get('outfits', d);
+  if (!o) { state.archOpen = null; return renderArchive(); }
+  const items = await db.getAll('items');
+  const byId = Object.fromEntries(items.map(i => [i.id, i]));
+  const fav = await db.get('feedback', `fav-${d}`);
+  const cond = await condForOutfit(o);
+  const order = outs.map(x => x.date).reverse(); // 옛날 → 최근
+  const i = order.indexOf(d);
+  let html = `<button class="back" id="archBack">‹ 지난 코디</button>
+    <p class="eyebrow" style="margin-top:6px">${i >= 0 ? `${i + 1} / ${order.length}` : ''}</p>`;
+  html += await dayCard(d, o, await db.get('illustrations', d), byId, { isPast: true });
+  html += `<div class="fav-box">
+    <button class="btn ${fav ? 'fav-on' : ''}" id="favBtn">${fav ? '♥ 또 입을 코디에 저장됨' : '♡ 나중에 또 이렇게 입기'}</button>
+    <p class="hint">${cond.band == null ? '이 날은 날씨 기록이 없어서 비슷한 날을 찾기 어려워요.'
+      : fav ? `${condLabel(cond)}에 자동으로 다시 입혀 줘요. 한 번 더 누르면 취소돼요.`
+      : `비슷한 날(${condLabel(cond)})이 오면 이 코디를 다시 골라 줘요.`}</p></div>`;
+  $view.innerHTML = html;
+  animateIn();
+  $view.querySelector('#archBack').onclick = () => { state.archOpen = null; renderArchive(); };
+  bindSwipe($view.querySelector('.day'), dir => {
+    const n = order[i + dir];
+    if (!n) return false;
+    state.archOpen = n; state.swipeDir = dir; renderArchiveDay(n);
+    return true;
+  });
+  $view.querySelector('#favBtn').onclick = async () => {
+    if (fav) {
+      await db.del('feedback', `fav-${d}`);
+      toast('또 입을 코디에서 뺐어요.');
+      return renderArchiveDay(d);
+    }
+    if (cond.band == null) return alert('이 날은 날씨 기록이 없어서 비슷한 날을 찾을 수 없어요.');
+    const f = { id: `fav-${d}`, kind: 'fav', date: d, itemIds: [...o.items], mood: o.mood, palette: o.palette || [], cond, text: `${md(d)} 코디 또 입기`, createdAt: new Date().toISOString() };
+    await db.put('feedback', f);
+    await renderArchiveDay(d);
+    offerFavDays(f, byId);
+  };
+}
+
+// 그 코디를 입은 날의 조건 (출근/휴무 + 아침 기온 구간)
+async function condForOutfit(o) {
+  if (o.morning != null) return condOf({ workCode: o.workCode }, o.morning);
+  const ctx = await dayContext(o.date);
+  return condOf({ ...ctx, workCode: o.workCode || ctx.workCode });
+}
+
+// 찜하자마자: 이번 주·다음 주에 비슷한 날이 있으면 '바로 입을까요?'
+async function offerFavDays(f, byId) {
+  const t = await today();
+  const nw = weekOf(addDays(weekOf(t).end, 1));
+  const items = await db.getAll('items');
+  const outs = await db.getAll('outfits');
+  const days = [];
+  for (let d = t; d <= nw.end; d = addDays(d, 1)) {
+    const ctx = await dayContext(d);
+    const cur = outs.find(x => x.date === d);
+    if (cur && cur.items.join(',') === f.itemIds.join(',')) continue;
+    if (pickFav([f], d, ctx, items, outs)) days.push({ d, ctx, cur });
+  }
+  if (!days.length) return toast('찜했어요. 비슷한 날이 오면 이 코디를 다시 골라 줘요.');
+  const el = openSheet(`<h3>찜했어요 ♥</h3>
+    <p class="sheet-sub">비슷한 날이 곧 있어요. 지금 바로 이 코디로 바꿀까요?</p>
+    <ul class="fav-days">${days.map(({ d, ctx, cur }) => `<li><div><b>${md(d)} (${DOW_KO[weekday(d)]})</b> ${esc(condLabel(condOf(ctx)).split(' (')[0])}${condOf(ctx).temp != null ? ` · 아침 ${condOf(ctx).temp}℃` : ''}
+      <p class="hint" style="margin:2px 0 0">지금 코디: ${cur ? esc(cur.mood) : '아직 없음'}</p></div>
+      <button class="small-btn" data-wear="${d}">이 날 입기</button></li>`).join('')}</ul>
+    <div class="row"><button class="btn ghost" id="favLater">나중에 자동으로</button></div>`);
+  el.querySelector('#favLater').onclick = () => { el.remove(); toast('비슷한 날이 오면 자동으로 다시 골라 줘요.'); };
+  el.querySelectorAll('[data-wear]').forEach(b => b.onclick = async () => {
+    const d = b.dataset.wear;
+    const copied = await wearFav(d, f);
+    if (!copied) { try { await requestIllustration(d, 'redo'); } catch {} }
+    b.textContent = '바꿨어요'; b.disabled = true;
+    toast(`${md(d)} 코디를 바꿨어요${copied ? ' · 그림도 그대로 가져왔어요' : ''}.`);
   });
 }
 
@@ -266,7 +455,7 @@ async function autoRun() {
       const r = await generate(need, {});
       const fail = Object.keys(r.failed);
       if (fail.length) state.autoError = `${fail.map(md).join(', ')} 규칙에 맞는 코디를 못 찾았어요`;
-      if (r.saved.length) toast(`${r.saved.length}일 코디를 짰어요 (약 ${r.won}원). 그림은 자동으로 그려져요.`);
+      if (r.saved.length) toast(`${r.saved.length}일 코디를 짰어요${r.favSaved.length ? ` (찜 코디 ${r.favSaved.length}일 포함)` : ''}${r.won ? ` · 약 ${r.won}원` : ''}. 그림은 자동으로 그려져요.`);
     }
     // 그림 자동 요청: 오늘부터 다음 주 끝까지, 그림이 없거나 옛 그림인 날
     const ill = Object.fromEntries((await db.getAll('illustrations')).map(x => [x.date, x]));
@@ -297,7 +486,7 @@ async function runGenerate(dates, opts = {}) {
     el.remove();
     const fail = Object.entries(r.failed);
     if (fail.length) alert(`규칙에 맞는 코디를 못 찾았어요.\n${fail.map(([d, e]) => `${md(d)}: ${e.join(', ')}`).join('\n')}`);
-    for (const d of r.saved) { try { await requestIllustration(d, opts.redo ? 'redo' : 'normal'); } catch {} }
+    for (const d of r.saved) { if (!r.favSaved.includes(d)) { try { await requestIllustration(d, opts.redo ? 'redo' : 'normal'); } catch {} } }
     if (r.saved.length) toast(`코디를 바꿨어요 (약 ${r.won}원). 새 그림은 자동으로 그려져요.`);
     if (r.overlaps.length) alert(`같은 주 다른 날과 겹치는 옷이 있어요 (다른 날은 그대로 둬요)\n${r.overlaps.join('\n')}`);
   } catch (e) {
@@ -660,9 +849,9 @@ async function updateTestbar() {
 // ---------- 탭 ----------
 function render() {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === state.tab));
-  return ({ week: renderWeek, closet: renderCloset, settings: renderSettings })[state.tab]();
+  return ({ week: renderWeek, archive: renderArchive, closet: renderCloset, settings: renderSettings })[state.tab]();
 }
-document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { if (b.dataset.tab === 'closet') state.closetMode = null; state.tab = b.dataset.tab; render(); scrollTo(0, 0); });
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { if (b.dataset.tab === 'closet') state.closetMode = null; if (b.dataset.tab === 'archive') state.archOpen = null; state.tab = b.dataset.tab; render(); scrollTo(0, 0); });
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js');
 // 연결 링크(#key=…)로 열었으면 비밀번호를 저장하고 주소창에서 지운다
@@ -687,6 +876,9 @@ async function boot() {
   if ((await db.getAll('items')).length) { await sync(); if (state.tab === 'week') render(); await autoRun(); }
 }
 boot();
+// 확대 막기 (두 번 탭 · 두 손가락 확대)
+document.addEventListener('gesturestart', e => e.preventDefault());
+document.addEventListener('dblclick', e => e.preventDefault(), { passive: false });
 setInterval(async () => {
   if (document.visibilityState !== 'visible' || !((await db.getMeta('illustPending')) || []).length) return;
   try { const got = await pullIllustrations(); if (got) { toast(`새 그림 ${got}장이 도착했어요.`); if (state.tab === 'week') render(); } } catch {}
