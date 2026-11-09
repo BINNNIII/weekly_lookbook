@@ -174,3 +174,9 @@ button.cloth{padding:0;text-align:left;font:inherit;color:inherit}
 .illu-wrap .illu{margin-top:0}
 .illu.stale{filter:saturate(.7) opacity(.75)}
 .illu-badge{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);background:rgba(42,38,34,.82);color:#fff;font-size:12px;padding:7px 12px;border-radius:99px;white-space:nowrap}
+
+/* 아이템 빼기 */
+.items li{position:relative}
+.it-tx{min-width:0;flex:1}
+.it-rm{flex:none;width:26px;height:26px;border-radius:50%;border:1px solid var(--line);background:var(--card);color:var(--sub);font-size:11px;line-height:1;padding:0}
+.actions+.actions{padding-top:4px}

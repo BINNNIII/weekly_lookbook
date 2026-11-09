@@ -5,10 +5,11 @@ import { CATEGORIES, LENGTHS, THICKNESS, BAG_SIZES, FORMALITY, suggest, required
 import { shrinkPhoto } from './photo.js';
 import { workerFetch, buildDays, diffDays, WORKER_URL } from './calendar.js';
 import { fetchWeather, commuteTemp } from './weather.js';
-import { generate } from './engine.js';
+import { generate, dayContext } from './engine.js';
+import { validateOutfit } from './rules.js';
 import { requestIllustration, pullIllustrations } from './illust.js';
 
-const APP_VERSION = 'v11';
+const APP_VERSION = 'v12';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
@@ -118,6 +119,7 @@ async function renderWeek() {
   const sel0 = $view.querySelector('.mini.sel'); if (sel0) sel0.scrollIntoView({ inline: 'center', block: 'nearest' });
   bindSeg();
   if (!past && o && sel === t) bindFeedback(sel, o);
+  if (!past && o && sel >= t) bindEdit(sel, o, byId);
   const retry = $view.querySelector('#autoRetry');
   if (retry) retry.onclick = () => { state.autoError = null; autoRun(); };
   if (past) $view.querySelector('#delPrev').onclick = async () => {
@@ -153,6 +155,7 @@ function liveWx(w, schedule = []) {
 }
 
 async function dayCard(d, o, il, byId, isToday, inf, wx, isPast = false) {
+  const canEdit = !isPast && d >= (await today()); // 오늘과 앞으로의 날은 언제든 재코디·아이템 빼기 가능
   const code = inf?.workCode || o.workCode;
   const schedule = inf?.schedule || o.schedule || [];
   const wxLine = wx ? liveWx(wx, schedule) : wxText(o.weather);
@@ -160,21 +163,25 @@ async function dayCard(d, o, il, byId, isToday, inf, wx, isPast = false) {
     ? `<p class="hint warn-hint">코디를 짤 때보다 최저기온이 ${Math.abs(wx.min - o.weather.min)}℃ ${wx.min < o.weather.min ? '낮아졌어요. 아우터를 더 따뜻하게 챙기세요' : '높아졌어요. 아우터가 더울 수 있어요'}.</p>` : '';
   const list = o.items.map(id => byId[id]).filter(Boolean).map(i => `<li>
       ${i.photo ? `<img class="thumb" src="${i.photo}" alt="">` : '<div class="basic">기본템</div>'}
-      <div><p class="nm">${esc(i.name)}</p><p class="cl">${esc(i.color)}</p></div></li>`).join('');
+      <div class="it-tx"><p class="nm">${esc(i.name)}</p><p class="cl">${esc(i.color)}</p></div>
+      ${canEdit ? `<button class="it-rm" data-rm="${i.id}" aria-label="${esc(i.name)} 빼기">✕</button>` : ''}</li>`).join('');
   const missing = o.items.filter(id => !byId[id]).length;
   let actions = '';
   if (isToday) {
     const fb = await db.get('feedback', `fb-${d}`);
-    actions = `<div class="actions">
+    actions += `<div class="actions">
       <div class="fb"><button class="chip ${fb?.kind === 'like' ? 'on' : ''}" data-kind="like">👍 좋아요</button>
       <button class="chip ${fb?.kind === 'dislike' ? 'on' : ''}" data-kind="dislike">👎 별로예요</button></div>
-      <textarea class="memo" rows="1" placeholder="짧은 메모 (선택) — 예: 따뜻하고 편했음">${esc(fb?.text || '')}</textarea>
+      <textarea class="memo" id="fbMemo" rows="1" placeholder="짧은 메모 (선택) — 예: 따뜻하고 편했음">${esc(fb?.text || '')}</textarea>
       <div class="row"><button class="btn" id="fbSave">피드백 저장</button></div>
-      ${fb ? `<p class="hint">저장됨 · ${new Date(fb.createdAt).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>` : ''}
-      <p class="lb-small">재코디</p>
+      ${fb ? `<p class="hint">저장됨 · ${new Date(fb.createdAt).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>` : ''}</div>`;
+  }
+  if (canEdit) {
+    actions += `<div class="actions">
+      <p class="lb-small">재코디 · ${md(d)} (${DOW_KO[weekday(d)]})</p>
       <textarea class="memo" id="redoReason" rows="1" placeholder="바꾸고 싶은 이유 (선택) — 예: 바지 말고 치마"></textarea>
-      <div class="row"><button class="btn ghost" id="redoBtn">재코디 요청</button></div>
-      <p class="hint">오늘 코디만 바로 바뀌고, 그림은 새로 그려지면 바뀌어요. 다른 날은 그대로예요.</p></div>`;
+      <div class="row"><button class="btn ghost" id="redoBtn" data-d="${d}">재코디 요청</button></div>
+      <p class="hint">이 날 코디만 바로 바뀌고, 그림은 새로 그려지면 바뀌어요. 다른 날은 그대로예요. 마음에 들 때까지 몇 번이든 할 수 있어요.</p></div>`;
   }
   return `<article class="day">
     <div class="stage"><div class="meta"><span class="date">${md(d)}</span><span class="dow">${DOW_EN[weekday(d)]}</span>${isToday ? '<span class="today-mark">오늘</span>' : ''}</div>
@@ -198,7 +205,7 @@ function bindFeedback(d, o) {
     kind = c.dataset.kind;
     $view.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === c));
   });
-  const memo = $view.querySelector('.memo');
+  const memo = $view.querySelector('#fbMemo');
   memo.oninput = () => { memo.style.height = 'auto'; memo.style.height = memo.scrollHeight + 'px'; };
   $view.querySelector('#fbSave').onclick = async () => {
     if (!kind) return toast('좋아요 또는 별로예요를 먼저 골라 주세요.');
@@ -206,10 +213,27 @@ function bindFeedback(d, o) {
     toast('피드백을 저장했어요. 다음 코디에 반영돼요.');
     renderWeek();
   };
-  $view.querySelector('#redoBtn').onclick = () => {
-    const reason = $view.querySelector('#redoReason').value.trim();
-    runGenerate([d], { redo: true, reason });
-  };
+}
+
+function bindEdit(d, o, byId) {
+  const redo = $view.querySelector('#redoBtn');
+  if (redo) redo.onclick = () => runGenerate([d], { redo: true, reason: $view.querySelector('#redoReason').value.trim() });
+  $view.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => {
+    const id = b.dataset.rm, it = byId[id];
+    if (!confirm(`'${it?.name || id}'을(를) ${md(d)} 코디에서 뺄까요?\n그림도 새로 그려져요.`)) return;
+    const cur = await db.get('outfits', d);
+    const items = cur.items.filter(x => x !== id);
+    await db.put('outfits', { ...cur, items, history: [...(cur.history || []), { items: cur.items, mood: cur.mood, at: cur.createdAt || null, reason: `아이템 빼기: ${it?.name || id}` }].slice(-5) });
+    // 다음 코디에 참고하도록 기록
+    await db.put('feedback', { id: `rm-${d}-${id}`, kind: 'remove', date: d, itemIds: [id], text: `${md(d)} 코디에서 직접 뺌`, createdAt: new Date().toISOString() });
+    const il = await db.get('illustrations', d);
+    if (il) await db.put('illustrations', { ...il, stale: true });
+    try { await requestIllustration(d, 'redo'); } catch {}
+    const errs = validateOutfit(items, await db.getAll('items'), await dayContext(d));
+    toast(`${it?.name || '아이템'}을(를) 뺐어요. 그림은 새로 그려지면 바뀌어요.`);
+    if (errs.length) alert(`참고: 지금 코디는 규칙과 맞지 않는 부분이 있어요.\n${errs.join('\n')}\n\n필요하면 재코디를 눌러 주세요.`);
+    renderWeek();
+  });
 }
 
 // ---------- 자동 코디·일러스트 (비용 자동 승인, 일러스트는 하루 5장 한도는 서버에서) ----------
@@ -556,16 +580,6 @@ async function renderSettings() {
   const monthWon = usage.filter(u => (u.at || '').slice(0, 7) === ym).reduce((a, u) => a + (u.won || 0), 0);
   const when = s => s ? new Date(s).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-';
   $view.innerHTML = `<p class="eyebrow">Settings</p><h1 class="title">설정</h1>
-    <div class="panel"><h3>캘린더 · 날씨 연결</h3>
-      <p>${key ? `캘린더: ${state.syncError ? '⚠ ' + esc(state.syncError) : (snap ? '연결됨 · ' + esc((snap.calendars || []).join(', ')) : '아직 확인 전')}` : '캘린더: 앱 비밀번호가 아직 없어요. 받은 연결 링크를 한 번 열거나 아래에 붙여 넣어 주세요.'}</p>
-      ${snap?.errors?.length ? `<p class="hint warn-hint">읽지 못한 캘린더: ${esc(snap.errors.join(', '))}</p>` : ''}
-      <p class="hint">마지막 캘린더 확인 ${when(snap?.checkedAt)} · 날씨 ${when(wx?.fetchedAt)} (서울, Open-Meteo)</p>
-      <div class="row"><button class="btn" id="syncNow">지금 확인</button></div>
-      <p class="hint">${key ? `저장된 연결 비밀번호: …${esc(key.slice(-4))}` : ''} · 연결 링크를 다시 누르면 자동으로 바뀌어요.</p>
-      <div class="set-row"><input class="inp" id="keyIn" placeholder="연결 링크 또는 비밀번호 붙여 넣기 (API 키 X)" style="font-size:13px"><button class="small-btn" id="keySave">저장</button></div></div>
-    <div class="panel"><h3>자동 코디 · 일러스트</h3>
-      <p>켜 두면 앱을 열 때 비어 있는 날(이번 주 남은 날 + 다음 주)의 코디를 알아서 짜고, 그림도 자동으로 그려져요. 비용은 미리 승인된 걸로 처리해요 (코디 주 약 60원 · 일러스트는 Figma 크레딧, 하루 최대 5장).</p>
-      <div class="set-row"><span class="lb">자동으로 하기</span><button class="small-btn" id="autoToggle">${(await db.getMeta('autoMode')) === false ? '꺼짐 → 켜기' : '켜짐 → 끄기'}</button></div></div>
     <div class="panel"><h3>내 코디 규칙</h3>
       <p>코디를 짤 때 AI가 꼭 참고해요. 예: "금요일엔 바지", "빨간 가디건은 휴무일에만"</p>
       <ul class="rules">${custom.map(r => `<li><span>${esc(r.text)}</span><button class="small-btn" data-del="${r.id}">삭제</button></li>`).join('') || '<li class="empty">아직 없어요</li>'}</ul>
@@ -579,6 +593,16 @@ async function renderSettings() {
       <div class="row"><button class="btn" id="exp">백업 내보내기</button>
       <label class="btn ghost" style="text-align:center">불러오기<input type="file" accept="application/json,.json" hidden id="imp"></label></div>
       <p class="hint">지금 저장된 것: 옷 ${all.items.length}개 · 코디 ${all.outfits.length}일 · 일러스트 ${all.illustrations.length}장 · 피드백 ${all.feedback.length}개</p></div>
+    <div class="panel"><h3>캘린더 · 날씨 연결</h3>
+      <p>${key ? `캘린더: ${state.syncError ? '⚠ ' + esc(state.syncError) : (snap ? '연결됨 · ' + esc((snap.calendars || []).join(', ')) : '아직 확인 전')}` : '캘린더: 앱 비밀번호가 아직 없어요. 받은 연결 링크를 한 번 열거나 아래에 붙여 넣어 주세요.'}</p>
+      ${snap?.errors?.length ? `<p class="hint warn-hint">읽지 못한 캘린더: ${esc(snap.errors.join(', '))}</p>` : ''}
+      <p class="hint">마지막 캘린더 확인 ${when(snap?.checkedAt)} · 날씨 ${when(wx?.fetchedAt)} (서울, Open-Meteo)</p>
+      <div class="row"><button class="btn" id="syncNow">지금 확인</button></div>
+      <p class="hint">${key ? `저장된 연결 비밀번호: …${esc(key.slice(-4))}` : ''} · 연결 링크를 다시 누르면 자동으로 바뀌어요.</p>
+      <div class="set-row"><input class="inp" id="keyIn" placeholder="연결 링크 또는 비밀번호 붙여 넣기 (API 키 X)" style="font-size:13px"><button class="small-btn" id="keySave">저장</button></div></div>
+    <div class="panel"><h3>자동 코디 · 일러스트</h3>
+      <p>켜 두면 앱을 열 때 비어 있는 날(이번 주 남은 날 + 다음 주)의 코디를 알아서 짜고, 그림도 자동으로 그려져요. 비용은 미리 승인된 걸로 처리해요 (코디 주 약 60원 · 일러스트는 Figma 크레딧, 하루 최대 5장).</p>
+      <div class="set-row"><span class="lb">자동으로 하기</span><button class="small-btn" id="autoToggle">${(await db.getMeta('autoMode')) === false ? '꺼짐 → 켜기' : '켜짐 → 끄기'}</button></div></div>
     <div class="panel"><h3>테스트용 오늘 날짜</h3><p>다른 날짜를 '오늘'로 보고 싶을 때만 써요. 평소에는 비워 두세요.</p>
       <div class="set-row"><input type="date" id="tdate" value="${test || ''}"><button class="small-btn" id="tclear">원래 날짜로</button></div></div>
     <div class="panel"><h3>앱 정보</h3><p>주간 코디 ${APP_VERSION} · 데이터는 이 폰 안에만 저장돼요.</p></div>`;
