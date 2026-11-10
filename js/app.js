@@ -10,7 +10,7 @@ import { condOf, condLabel, pickFav } from './looks.js';
 import { validateOutfit } from './rules.js';
 import { requestIllustration, pullIllustrations } from './illust.js';
 
-const APP_VERSION = 'v13';
+const APP_VERSION = 'v14';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
@@ -102,7 +102,9 @@ async function renderWeek() {
   animateIn();
 
   $view.querySelectorAll('.mini').forEach(b => b.onclick = () => { state.selected = b.dataset.day; renderWeek(); scrollTo({ top: 0, behavior: 'smooth' }); });
-  const sel0 = $view.querySelector('.mini.sel'); if (sel0) sel0.scrollIntoView({ inline: 'center', block: 'nearest' });
+  // 아래 띠는 옆으로만 움직여 선택한 날을 가운데로 (화면 전체는 움직이지 않음)
+  const sel0 = $view.querySelector('.mini.sel'), strip = $view.querySelector('.strip');
+  if (sel0 && strip) strip.scrollLeft = sel0.offsetLeft - strip.offsetLeft - (strip.clientWidth - sel0.offsetWidth) / 2;
   bindSwipe($view.querySelector('.day, .panel.empty-day'), dir => {
     const n = shown[shown.indexOf(sel) + dir];
     if (!n) return false;
