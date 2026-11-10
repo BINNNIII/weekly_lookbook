@@ -10,7 +10,7 @@ import { condOf, condLabel, pickFav } from './looks.js';
 import { validateOutfit, itemBlockReason } from './rules.js';
 import { requestIllustration, pullIllustrations } from './illust.js';
 
-const APP_VERSION = 'v15';
+const APP_VERSION = 'v16';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
@@ -211,8 +211,9 @@ async function dayCard(d, o, il, byId, opt = {}) {
 function openSheet(inner) {
   const el = document.createElement('div');
   el.className = 'modal';
-  el.innerHTML = `<div class="sheet"><div class="grab"></div>${inner}</div>`;
+  el.innerHTML = `<div class="sheet"><div class="grab"></div><button class="sheet-x" aria-label="닫기">✕</button>${inner}</div>`;
   el.onclick = e => { if (e.target === el) el.remove(); };
+  el.querySelector('.sheet-x').onclick = () => el.remove();
   document.body.appendChild(el);
   return el;
 }
@@ -311,7 +312,9 @@ async function openAddSheet(d) {
     <p class="sheet-sub">신발·가방·하의처럼 하나만 입는 건 지금 것과 바뀌어요.</p>
     <div class="filters add-cats">${cats.map(c => `<button data-ac="${c}">${c}</button>`).join('')}</div>
     <div class="pick-grid" id="pickGrid"></div>
-    <button class="btn ghost" id="newCloth" style="width:100%;margin-top:12px">＋ 옷장에 새 옷 등록</button>`);
+    <button class="btn ghost" id="newCloth" style="width:100%;margin-top:12px">＋ 옷장에 새 옷 등록</button>
+    <button class="btn" id="addClose" style="width:100%;margin-top:8px">닫기</button>`);
+  el.querySelector('#addClose').onclick = () => el.remove();
   el.querySelector('.sheet').classList.add('tall');
   const paint = () => {
     el.querySelectorAll('[data-ac]').forEach(b => b.classList.toggle('on', b.dataset.ac === cat));

@@ -237,3 +237,11 @@ button.cloth{padding:0;text-align:left;font:inherit;color:inherit}
 .pick .tagline{font-size:10.5px;color:var(--sub);padding:2px 7px 0}
 .pick .tagline.warn{color:var(--off)}
 .pick.now{opacity:.5}
+
+/* v16 · 팝업 닫기 (아이폰은 cursor:pointer가 있어야 빈 곳 누름을 인식) */
+.modal{cursor:pointer}
+.sheet{position:relative;cursor:auto}
+.sheet h3{padding-right:40px}
+.sheet-x{position:absolute;top:12px;right:12px;width:34px;height:34px;border-radius:50%;border:0;background:var(--bg);color:var(--sub);font-size:15px;line-height:1;padding:0;z-index:2}
+.sheet.tall .sheet-x{position:sticky;float:right;top:0;margin:-6px -6px 0 0}
+.busy .sheet-x{display:none}
