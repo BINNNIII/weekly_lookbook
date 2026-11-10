@@ -7,17 +7,17 @@ import { workerFetch, buildDays, diffDays, WORKER_URL } from './calendar.js';
 import { fetchWeather, commuteTemp } from './weather.js';
 import { generate, dayContext, wearFav } from './engine.js';
 import { condOf, condLabel, pickFav } from './looks.js';
-import { validateOutfit } from './rules.js';
+import { validateOutfit, itemBlockReason } from './rules.js';
 import { requestIllustration, pullIllustrations } from './illust.js';
 
-const APP_VERSION = 'v14';
+const APP_VERSION = 'v15';
 const $view = document.getElementById('view');
 const CATS = ['아우터', '상의', '하의', '원피스', '신발', '가방', '양말·스타킹', '액세서리'];
 const DOW_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 const DOW_KO = ['일', '월', '화', '수', '목', '금', '토'];
 const MONTH_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-const state = { autoBusy: false, autoError: null, tab: 'week', selected: null, swipeDir: 0, archFilter: '전체', archOpen: null, archScroll: 0, closetCat: '전체', closetMode: null, closetScroll: 0, syncError: null };
+const state = { autoBusy: false, autoError: null, tab: 'week', selected: null, swipeDir: 0, archFilter: '전체', archOpen: null, archScroll: 0, addTo: null, hiddenAt: 0, closetCat: '전체', closetMode: null, closetScroll: 0, syncError: null };
 
 // ---------- 공통 ----------
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -71,7 +71,8 @@ async function renderWeek() {
   const shown = [...w.days, preview];
   const outfits = Object.fromEntries((await db.getAll('outfits')).filter(o => shown.includes(o.date)).map(o => [o.date, o]));
   const illus = Object.fromEntries((await db.getAll('illustrations')).filter(x => shown.includes(x.date)).map(x => [x.date, x]));
-  if (!state.selected || !shown.includes(state.selected)) state.selected = t;
+  // 처음 들어올 때: 오후 1시 전이면 오늘, 1시부터는 내일 코디
+  if (!state.selected || !shown.includes(state.selected)) state.selected = new Date().getHours() >= 13 && shown.includes(addDays(t, 1)) ? addDays(t, 1) : t;
   const sel = state.selected;
   const o = outfits[sel];
   const live = (await db.getMeta('calendarSnapshot'))?.days || {};
@@ -200,6 +201,7 @@ async function dayCard(d, o, il, byId, opt = {}) {
       <p class="sched">${schedule.map(esc).join(' · ') || (isOff(code) ? '일정 없음' : '')}</p>
       <p class="wx">${esc(wxLine)}</p>${wxDiff}
       <ul class="items">${list}</ul>
+      ${canEdit ? '<button class="it-add" id="addItem">＋ 아이템 추가</button>' : ''}
       ${missing ? `<p class="hint">옷장에서 삭제된 옷 ${missing}개는 숨겼어요.</p>` : ''}
       <p class="note">${esc(o.reason)}</p></div>
     ${actions}</article>`;
@@ -259,6 +261,8 @@ function bindFeedback(d, o) {
 }
 
 function bindEdit(d, o, byId) {
+  const add = $view.querySelector('#addItem');
+  if (add) add.onclick = () => openAddSheet(d);
   const redo = $view.querySelector('#redoOpen');
   if (redo) redo.onclick = () => {
     const el = openSheet(`<h3>${md(d)} (${DOW_KO[weekday(d)]}) 재코디</h3>
@@ -281,6 +285,7 @@ function bindEdit(d, o, byId) {
     const items = cur.items.filter(x => x !== id);
     await db.put('outfits', { ...cur, items, history: [...(cur.history || []), { items: cur.items, mood: cur.mood, at: cur.createdAt || null, reason: `아이템 빼기: ${it?.name || id}` }].slice(-5) });
     // 다음 코디에 참고하도록 기록
+    await db.del('feedback', `add-${d}-${id}`);
     await db.put('feedback', { id: `rm-${d}-${id}`, kind: 'remove', date: d, itemIds: [id], text: `${md(d)} 코디에서 직접 뺌`, createdAt: new Date().toISOString() });
     const il = await db.get('illustrations', d);
     if (il) await db.put('illustrations', { ...il, stale: true });
@@ -290,6 +295,74 @@ function bindEdit(d, o, byId) {
     if (errs.length) alert(`참고: 지금 코디는 규칙과 맞지 않는 부분이 있어요.\n${errs.join('\n')}\n\n필요하면 재코디를 눌러 주세요.`);
     renderWeek();
   });
+}
+
+// ---------- 코디에 아이템 직접 추가 ----------
+const SINGLE = ['신발', '가방', '하의', '양말·스타킹']; // 하나만 입는 종류 → 기존 것과 교체
+async function openAddSheet(d) {
+  const o = await db.get('outfits', d);
+  const items = await db.getAll('items');
+  const ctx = await dayContext(d);
+  const order = i => CATS.indexOf(i.category) * 1000 + (i.photo ? 0 : 500);
+  items.sort((a, b) => order(a) - order(b) || a.id.localeCompare(b.id));
+  const cats = CATS.filter(c => items.some(i => i.category === c));
+  let cat = state.addCat && cats.includes(state.addCat) ? state.addCat : cats[0];
+  const el = openSheet(`<h3>${md(d)} (${DOW_KO[weekday(d)]}) 아이템 추가</h3>
+    <p class="sheet-sub">신발·가방·하의처럼 하나만 입는 건 지금 것과 바뀌어요.</p>
+    <div class="filters add-cats">${cats.map(c => `<button data-ac="${c}">${c}</button>`).join('')}</div>
+    <div class="pick-grid" id="pickGrid"></div>
+    <button class="btn ghost" id="newCloth" style="width:100%;margin-top:12px">＋ 옷장에 새 옷 등록</button>`);
+  el.querySelector('.sheet').classList.add('tall');
+  const paint = () => {
+    el.querySelectorAll('[data-ac]').forEach(b => b.classList.toggle('on', b.dataset.ac === cat));
+    el.querySelector('#pickGrid').innerHTML = items.filter(i => i.category === cat).map(i => {
+      const inNow = o.items.includes(i.id), why = itemBlockReason(i, ctx);
+      return `<button class="pick ${inNow ? 'now' : ''}" data-pick="${i.id}" ${inNow ? 'disabled' : ''}>
+        ${i.photo ? `<img src="${i.photo}" alt="" loading="lazy">` : '<div class="basic">기본템</div>'}
+        <p class="nm">${esc(i.name)}</p><p class="cl">${esc(i.color)}</p>
+        ${inNow ? '<p class="tagline">지금 코디</p>' : why ? `<p class="tagline warn">⚠ ${esc(why)}</p>` : ''}</button>`;
+    }).join('');
+    el.querySelectorAll('[data-pick]').forEach(b => b.onclick = async () => { el.remove(); await addToOutfit(d, b.dataset.pick); });
+  };
+  el.querySelectorAll('[data-ac]').forEach(b => b.onclick = () => { cat = state.addCat = b.dataset.ac; paint(); });
+  el.querySelector('#newCloth').onclick = () => {
+    el.remove();
+    state.addTo = d; state.tab = 'closet';
+    state.closetMode = { view: 'form', id: null };
+    render().then(() => scrollTo(0, 0));
+  };
+  paint();
+}
+
+async function addToOutfit(d, id) {
+  const cur = await db.get('outfits', d);
+  const all = await db.getAll('items');
+  const byId = Object.fromEntries(all.map(i => [i.id, i]));
+  const it = byId[id];
+  if (!cur || !it) return;
+  // 바꿀 옷 고르기
+  const cat = id2 => byId[id2]?.category;
+  let out = [];
+  if (SINGLE.includes(it.category)) out = cur.items.filter(x => cat(x) === it.category);
+  if (it.category === '하의') out.push(...cur.items.filter(x => cat(x) === '원피스'));
+  if (it.category === '상의') out.push(...cur.items.filter(x => cat(x) === '원피스'));
+  if (it.category === '원피스') out = cur.items.filter(x => ['원피스', '상의', '하의'].includes(cat(x)));
+  const at = out.length ? cur.items.indexOf(out[0]) : cur.items.length;
+  const items = cur.items.filter(x => !out.includes(x));
+  items.splice(Math.min(at, items.length), 0, id);
+  await db.put('outfits', { ...cur, items, history: [...(cur.history || []), { items: cur.items, mood: cur.mood, at: cur.createdAt || null, reason: `아이템 추가: ${it.name}` }].slice(-5) });
+  // 다음 코디에 참고하도록 기록
+  await db.del('feedback', `rm-${d}-${id}`);
+  await db.put('feedback', { id: `add-${d}-${id}`, kind: 'add', date: d, itemIds: [id], text: `${md(d)} 코디에 직접 넣음`, createdAt: new Date().toISOString() });
+  const il = await db.get('illustrations', d);
+  if (il) await db.put('illustrations', { ...il, stale: true });
+  try { await requestIllustration(d, 'redo'); } catch {}
+  const names = out.map(x => byId[x]?.name).filter(Boolean);
+  toast(names.length ? `${names.join(', ')} → ${it.name}(으)로 바꿨어요. 그림은 새로 그려지면 바뀌어요.` : `${it.name}을(를) 넣었어요. 그림은 새로 그려지면 바뀌어요.`);
+  const errs = validateOutfit(items, all, await dayContext(d));
+  state.tab = 'week'; state.selected = d;
+  await render();
+  if (errs.length) alert(`참고: 지금 코디는 규칙과 맞지 않는 부분이 있어요.\n${errs.join('\n')}\n\n필요하면 ✕로 빼거나 재코디를 눌러 주세요.`);
 }
 
 // ---------- 기록 (역대 코디 · 또 입기) ----------
@@ -664,7 +737,7 @@ async function renderClothForm(id) {
   const touched = new Set(orig ? ['name', 'category', 'color', 'length', 'thickness', 'size', 'formality'] : []);
 
   $view.innerHTML = `<button class="back" id="back">‹ ${orig ? '돌아가기' : '옷장'}</button>
-    <h1 class="title" style="margin-top:6px">${orig ? '옷 수정' : '옷 추가'}</h1>
+    <h1 class="title" style="margin-top:6px">${orig ? '옷 수정' : '옷 추가'}</h1>${!orig && state.addTo ? `<p class="hint" style="margin:-10px 0 4px">등록하면 ${md(state.addTo)} 코디에 바로 들어가요.</p>` : ''}
     <div class="field"><p class="lb">사진</p>
       <div class="photo-box" id="pbox"></div>
       <div class="row"><label class="btn ghost" style="text-align:center">사진 찍기 · 앨범에서 고르기<input type="file" accept="image/*" hidden id="pfile"></label>
@@ -696,7 +769,12 @@ async function renderClothForm(id) {
   };
   paintPhoto(); paintOpts();
 
-  $('#back').onclick = () => openCloset(orig ? { view: 'detail', id } : null);
+  const from = !orig && state.addTo; // 코디 카드에서 '새 옷 등록'으로 들어옴
+  if (from) $('#back').textContent = `‹ ${md(from)} 코디로`;
+  $('#back').onclick = () => {
+    if (from) { state.addTo = null; state.closetMode = null; state.tab = 'week'; state.selected = from; render(); scrollTo(0, 0); return; }
+    openCloset(orig ? { view: 'detail', id } : null);
+  };
   $('#pfile').onchange = async e => {
     const file = e.target.files[0]; if (!file) return;
     try { f.photo = await shrinkPhoto(file); paintPhoto(); } catch (err) { alert(err.message); }
@@ -742,6 +820,7 @@ async function renderClothForm(id) {
     if (item.category !== '가방') delete item.size;
     if (!item.type) item.type = suggest(item.name).type || item.category;
     await db.put('items', item);
+    if (from) { state.addTo = null; state.closetMode = null; await addToOutfit(from, item.id); scrollTo(0, 0); return; }
     toast(orig ? '저장했어요.' : '옷장에 추가했어요. 다음 코디부터 쓰여요.');
     openCloset({ view: 'detail', id: item.id, justAdded: !orig });
   };
@@ -853,7 +932,7 @@ function render() {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === state.tab));
   return ({ week: renderWeek, archive: renderArchive, closet: renderCloset, settings: renderSettings })[state.tab]();
 }
-document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { if (b.dataset.tab === 'closet') state.closetMode = null; if (b.dataset.tab === 'archive') state.archOpen = null; state.tab = b.dataset.tab; render(); scrollTo(0, 0); });
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { if (b.dataset.tab === 'closet') state.closetMode = null; if (b.dataset.tab === 'archive') state.archOpen = null; if (b.dataset.tab === 'week') state.selected = null; state.addTo = null; state.tab = b.dataset.tab; render(); scrollTo(0, 0); });
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js');
 // 연결 링크(#key=…)로 열었으면 비밀번호를 저장하고 주소창에서 지운다
@@ -886,5 +965,7 @@ setInterval(async () => {
   try { const got = await pullIllustrations(); if (got) { toast(`새 그림 ${got}장이 도착했어요.`); if (state.tab === 'week') render(); } } catch {}
 }, 60000);
 document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'hidden') { state.hiddenAt = Date.now(); return; }
+  if (state.hiddenAt && Date.now() - state.hiddenAt > 600000) state.selected = null;
   if (document.visibilityState === 'visible' && (await db.getAll('items')).length) { await sync(); if (state.tab === 'week') render(); await autoRun(); }
 });

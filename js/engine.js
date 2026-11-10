@@ -97,6 +97,7 @@ async function feedbackText(byId) {
   for (const f of fb.filter(f => f.kind === 'custom')) lines.push(`- [내 규칙] ${f.text}`);
   for (const f of fb.filter(f => f.kind === 'rule')) lines.push(`- [기본 규칙] ${f.text}`);
   for (const f of fb.filter(f => f.kind === 'remove').slice(-30)) lines.push(`- [뺀 아이템 ${f.date ? md(f.date) : ''}] ${names(f.itemIds)} — 사용자가 코디에서 직접 뺐음. 비슷한 상황에서는 피할 것`);
+  for (const f of fb.filter(f => f.kind === 'add').slice(-30)) lines.push(`- [넣은 아이템 ${f.date ? md(f.date) : ''}] ${names(f.itemIds)} — 사용자가 코디에 직접 넣었음. 비슷한 상황에서 선호`);
   for (const f of fb.filter(f => f.kind === 'like' || f.kind === 'dislike').sort((a, b) => (a.date || '').localeCompare(b.date || '')).slice(-30)) {
     lines.push(`- [${f.kind === 'like' ? '좋았음' : '별로였음'}${f.date ? ' ' + md(f.date) : ''}] ${names(f.itemIds)}${f.text ? ` — 메모: ${f.text}` : ''}`);
   }
